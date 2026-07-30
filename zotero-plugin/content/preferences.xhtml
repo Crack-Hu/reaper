@@ -1,0 +1,74 @@
+<preferences>
+  <preference id="pref-name" name="extensions.zotero.reaper.attachmentName" type="string"/>
+  <preference id="pref-port" name="extensions.zotero.reaper.serverPort" type="string"/>
+</preferences>
+
+<vbox id="zotero-prefpane-reaper" style="padding: 8px">
+  <html:style>
+    .reaper-section {
+      margin-bottom: 16px;
+      padding: 12px 16px;
+      background: var(--material-background, #f8fafc);
+      border: 1px solid var(--fill-tertiary, #e2e8f0);
+      border-radius: 8px;
+    }
+    .reaper-section:last-of-type { margin-bottom: 8px; }
+    .reaper-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--fill-primary, #1e293b);
+      margin: 0 0 10px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--fill-quinary, #e2e8f0);
+    }
+    .reaper-desc {
+      font-size: 11px;
+      color: var(--fill-secondary, #64748b);
+      margin-top: 4px;
+    }
+    .reaper-input {
+      padding: 4px 8px;
+      border: 1px solid var(--fill-tertiary, #cbd5e1);
+      border-radius: 4px;
+      background: var(--material-background, white);
+      font-size: 14px;
+    }
+    .reaper-footer {
+      font-size: 11px;
+      color: var(--fill-secondary, #94a3b8);
+      text-align: center;
+      padding: 8px;
+      border-top: 1px solid var(--fill-quinary, #e2e8f0);
+      margin-top: 8px;
+    }
+    .reaper-code {
+      background: #e5e7eb;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-family: monospace;
+    }
+  </html:style>
+
+  <vbox class="reaper-section">
+    <html:h3 class="reaper-title">Attachment Name</html:h3>
+    <label value="Naming pattern for generated HTML attachments."/>
+    <html:p class="reaper-desc" style="margin-left:0;">
+      Use <html:code class="reaper-code">{arxiv_id}</html:code> as placeholder for the paper ID.
+    </html:p>
+    <html:input type="text"
+           preference="extensions.zotero.reaper.attachmentName"
+           class="reaper-input" style="width:300px;"/>
+  </vbox>
+
+  <vbox class="reaper-section">
+    <html:h3 class="reaper-title">Server Port</html:h3>
+    <label value="Port of the local Reaper backend."/>
+    <html:input type="text"
+           preference="extensions.zotero.reaper.serverPort"
+           class="reaper-input" style="width:120px;"/>
+  </vbox>
+
+  <html:div class="reaper-footer">
+    Reaper for Zotero v0.6.0
+  </html:div>
+</vbox>

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ── Reaper generated (all intermediates) ──
+data/
+
+# ── Pi ──
+.pi/
+
+# ── Zotero plugin build ──
+zotero-plugin/reaper-for-zotero.xpi
+zotero-plugin/_repack/
+
+# ── Config with secrets ──
+config.json
+
+# ── Tests ──
+tests/
+
+# ── Reference materials ──
+docs/
+materials/
+ref_repo/
+*.zip

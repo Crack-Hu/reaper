@@ -1,0 +1,15 @@
+{
+  "api": {
+    "key": "sk-xxx",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 16625
+  },
+  "translator": {
+    "concurrency": 3
+  },
+  "ar5ivist_dir": "ar5ivist"
+}
