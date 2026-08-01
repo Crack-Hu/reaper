@@ -23,7 +23,6 @@ from src import config
 ROOT = Path(__file__).parent.parent
 PAPERS_DIR = Path(config.ZOTERO_DIR)
 AR5IV_DIR = Path(config.AR5IV_DIR)
-UI_DIR = Path(__file__).parent / "rendering" / "ui"
 LOG_PATH = Path(config.LOG_DIR) / "server.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _log_file = open(str(LOG_PATH), "a", encoding="utf-8")
@@ -44,20 +43,7 @@ builtins.print = lambda *a, **kw: _log(*a, **kw) if a and str(a[0]).strip() else
 print(f"=== Reaper Server started ===")
 print(f"Log: {LOG_PATH}")
 
-# Cache UI files in memory
-_UI_CSS = ""
-_UI_JS = ""
-
-
-def load_ui():
-    global _UI_CSS, _UI_JS
-    if not _UI_CSS:
-        _UI_CSS = (UI_DIR / "reaper.css").read_text(encoding="utf-8")
-    if not _UI_JS:
-        _UI_JS = (UI_DIR / "reaper.js").read_text(encoding="utf-8")
-
 from src.translation.dictionary import TermDictionary
-
 
 _term_dict_instance = None
 
@@ -67,10 +53,8 @@ def get_term_dict():
         _term_dict_instance = TermDictionary()
     return _term_dict_instance
 
-
 def load_term_dict() -> dict:
     return get_term_dict().user
-
 
 def save_term_dict(data: dict):
     td = get_term_dict()
@@ -78,26 +62,7 @@ def save_term_dict(data: dict):
         td.set_user(en, zh)
 
 
-def inject_ui(html: str) -> str:
-    """Inject reaper.css and reaper.js links into the HTML."""
-    load_ui()
-    # Inject before </head>
-    css_tag = f"<style>\n{_UI_CSS}\n</style>"
-    js_tag = f"<script>\n{_UI_JS}\n</script>"
-    html = html.replace("</head>", f"{css_tag}\n{js_tag}\n</head>", 1)
-
-    # Also remove the minimal bootloader from content HTML
-    # (the full UI replaces it)
-    import re
-    html = re.sub(r'<style id="reaper-minimal">.*?</style>', '', html, flags=re.DOTALL)
-    html = re.sub(r'<script id="reaper-minimal">.*?</script>', '', html, flags=re.DOTALL)
-
-    return html
-
-
 class ReaperHandler(http.server.BaseHTTPRequestHandler):
-    """Custom HTTP handler for Reaper backend."""
-
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
 
@@ -108,7 +73,6 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             matches = list(PAPERS_DIR.glob(f"{paper_id}*.html"))
             if matches:
                 html = matches[0].read_text(encoding="utf-8")
-                html = inject_ui(html)
                 self._respond_html(html)
             else:
                 self._respond_json({"error": "paper not found"}, 404)
@@ -356,12 +320,10 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"  {' '.join(args)}")
 
-
 # ── Shared translation pool (one per server process) ──
 _translation_pool = None
 _active_caches: dict[str, "TranslationCache"] = {}  # paper_id → cache
 _active_tasks: dict[str, "Task"] = {}  # paper_id → task
-
 
 def get_translation_pool():
     from concurrent.futures import ThreadPoolExecutor
@@ -370,6 +332,16 @@ def get_translation_pool():
         _translation_pool = ThreadPoolExecutor(max_workers=config.TRANSLATION_CONCURRENCY)
         print(f"  Translation pool: {config.TRANSLATION_CONCURRENCY} workers", flush=True)
     return _translation_pool
+
+UI_DIR = ROOT / "src" / "rendering" / "ui"
+_UI_CSS = ""
+_UI_JS = ""
+
+
+def load_ui():
+    global _UI_CSS, _UI_JS
+    _UI_CSS = (UI_DIR / "toc-sidebar.css").read_text(encoding="utf-8")
+    _UI_JS = (UI_DIR / "toc-toggle.js").read_text(encoding="utf-8")
 
 
 def main():
@@ -391,7 +363,6 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down.")
         server.server_close()
-
 
 if __name__ == "__main__":
     main()

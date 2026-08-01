@@ -28,7 +28,7 @@ class Block:
 # Unified regex: matches h1 title, hN section headings, p paragraphs, figcaption in one left-to-right pass
 _TAG_PATTERN = re.compile(
     r'(<h1\b[^>]*class="[^"]*ltx_title_document[^"]*"[^>]*>)'       # title
-    r'|(<h\d\b[^>]*class="[^"]*ltx_title_section[^"]*"[^>]*>)'       # section heading
+    r'|(<h\d\b[^>]*class="[^"]*ltx_title_(?:sub)*section[^"]*"[^>]*>)' # section/subsection/subsubsection
     r'|(<p\b[^>]*class="[^"]*ltx_p[^"]*"[^>]*>)'                       # paragraph
     r'|(<figcaption\b[^>]*class="[^"]*ltx_caption[^"]*"[^>]*>)',       # figure caption
 )
@@ -102,10 +102,12 @@ def mark_and_extract(html: str) -> tuple[str, list[Block]]:
         # Determine type
         if 'ltx_title_document' in full_tag:
             btype, level = "title", 0
+        elif 'ltx_title_subsubsection' in full_tag:
+            btype, level = "section", 3
+        elif 'ltx_title_subsection' in full_tag:
+            btype, level = "section", 2
         elif 'ltx_title_section' in full_tag:
-            btype = "section"
-            h_match = re.match(r'<h(\d)', full_tag)
-            level = int(h_match.group(1)) - 1 if h_match else 1
+            btype, level = "section", 1
         elif 'ltx_caption' in full_tag:
             btype, level = "figcaption", 0
         else:
@@ -190,6 +192,13 @@ def mark_and_extract(html: str) -> tuple[str, list[Block]]:
 
         blocks[idx].text = text
         blocks[idx].math_map = math_map
+
+        # Extract id attribute for section headings (used by TOC navigation)
+        if blocks[idx].type in ("title", "section"):
+            tag_text = marked_html[tag_beg:tag_end_bracket]
+            id_match = re.search(r'(?<!data-reaper-)id="([^"]+)"', tag_text)
+            if id_match:
+                blocks[idx].label = id_match.group(1)
 
     return marked_html, blocks
 

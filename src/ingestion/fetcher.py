@@ -5,6 +5,7 @@ import re
 import subprocess
 import tarfile
 import os
+import time as _time
 import threading
 from pathlib import Path
 from .. import config
@@ -145,12 +146,17 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
+        idle_timeout = getattr(config, 'AR5IVIST_IDLE_TIMEOUT', 600)
+
         last_line = [""]
+        last_output_at = [_time.time()]
+
         def _log_progress():
             for line in proc.stdout:
                 log_f.write(line)
                 log_f.flush()
                 last_line[0] = line.rstrip()[-80:]
+                last_output_at[0] = _time.time()
 
         t = threading.Thread(target=_log_progress, daemon=True)
         t.start()
@@ -160,8 +166,25 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             t.join(timeout=15)
             dots += 1
             tail = last_line[0]
+            idle = _time.time() - last_output_at[0]
+            elapsed = dots * 15
             if tail:
-                print(f"          [{dots*15}s] {tail}", flush=True)
+                print(f"          [{elapsed}s] {tail}", flush=True)
+            else:
+                print(f"          [{elapsed}s] waiting... (idle {idle:.0f}s / limit {idle_timeout}s)", flush=True)
+
+            if idle > idle_timeout:
+                print(f"          ⚠ idle timeout ({idle_timeout}s) — killing docker container", flush=True)
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                raise SourceError(
+                    f"ar5ivist docker timed out after {elapsed}s "
+                    f"(no log output for {idle:.0f}s, threshold {idle_timeout}s). "
+                    f"Full log: {log_path}"
+                )
 
         t.join(timeout=5)
         print(f"          docker exit: {proc.returncode}", flush=True)

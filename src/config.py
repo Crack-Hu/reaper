@@ -33,6 +33,10 @@ ARXIV_SOURCE_DIR = os.path.join(DATA_DIR, "arxiv_source")
 # ar5ivist Docker 输出目录
 AR5IVIST_OUTPUT_DIR = os.path.join(DATA_DIR, "ar5ivist")
 
+# ar5ivist Docker 空闲超时（秒）：持续无日志输出超过此时间则视为卡死
+# 只要还在输出日志就不算超时，适合超长文章的转换
+AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
+
 # --- 翻译 API ---
 LLM_API_KEY = api_cfg.get("key", "")
 LLM_BASE_URL = api_cfg.get("base_url", "https://api.deepseek.com/v1")
