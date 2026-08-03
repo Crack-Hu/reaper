@@ -22,7 +22,11 @@ trl_cfg = cfg.get("translator", {})
 AR5IV_BASE = "https://ar5iv.labs.arxiv.org/html"
 
 # HTML 来源配置（按优先级排列）
-SOURCES = cfg.get("sources", [{"type": "ar5iv"}])
+SOURCES = cfg.get("sources", [
+    {"type": "arxiv_html"},
+    {"type": "ar5iv"},
+    {"type": "ar5ivist_docker"},
+])
 
 # ar5ivist Docker 镜像
 AR5IVIST_DOCKER_IMAGE = cfg.get("ar5ivist_docker_image", "latexml/ar5ivist:2512.17")

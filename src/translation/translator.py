@@ -225,7 +225,7 @@ def _translate_one_section(args):
     """Worker: translate one section (or sub-part). Called by thread pool."""
     (sec_idx, total_secs, heading, part_info, paragraphs, shared_label,
      paper_title, abstract_text, term_dict, api_key, base_url, model, paper_id,
-     block_index_map, num_paras, progress_counter) = args
+     block_index_map, num_paras, progress_counter, cache) = args
 
     SKIP_TYPES = {"figure", "table", "equation"}
     translatable = [(i, b) for i, b in enumerate(paragraphs)
@@ -263,7 +263,9 @@ def _translate_one_section(args):
             if orig_block_idx >= 0:
                 if orig_block_idx not in result:
                     result[orig_block_idx] = zh
-                    if paper_id:
+                    if cache is not None:
+                        cache.put_zh(paragraphs[translatable[para_num-1][0]].text, zh)
+                    elif paper_id:
                         translation_cache.put(paper_id, paragraphs[translatable[para_num-1][0]].text, zh)
 
     term_count = len(terms)
@@ -281,7 +283,7 @@ def _translate_one_section(args):
     return sec_idx, result, terms
 
 
-def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None):
+def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None, cache=None):
     SKIP_TYPES = {"figure", "table", "equation"}
     print(f"      Grouping sections ...", flush=True)
     abstract_text, sections = group_blocks_by_section(blocks)
@@ -358,7 +360,7 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
         full_items.append((
             wi + 1, total_work, heading, f"part {wi+1}/{total_work}",
             paras, "", paper_title, abstract_text, term_dict,
-            api_key, base_url, model, paper_id, block_map, len(batch), progress_counter,
+            api_key, base_url, model, paper_id, block_map, len(batch), progress_counter, cache,
         ))
 
     if total_work == 0:
@@ -370,7 +372,7 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
         label = f"{w[2][:60]}"
         if w[3]:
             label += f" ({w[3]})"
-        print(f"        ({i+1}) {label} — {w[-2]} paras", flush=True)
+        print(f"        ({i+1}) {label} — {w[14]} paras", flush=True)
 
     print(f"      Starting concurrent ...", flush=True)
     own_pool = (executor is None)
@@ -392,7 +394,7 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
     print(f"      Done: {translated} blocks translated", flush=True)
 
 
-def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base_url, model, batch_size, paper_id, cache_hits):
+def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base_url, model, batch_size, paper_id, cache_hits, cache=None):
     """Legacy fixed-size batch mode."""
     SKIP_TYPES = {"figure", "table", "equation"}
     uncached = [(i, blocks[i]) for i in range(len(blocks))
@@ -435,7 +437,9 @@ def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base
                 if 1 <= para_num <= len(batch):
                     idx = batch[para_num - 1][0]
                     results[idx]["zh"] = zh
-                    if paper_id:
+                    if cache is not None:
+                        cache.put_zh(blocks[idx].text, zh)
+                    elif paper_id:
                         translation_cache.put(paper_id, blocks[idx].text, zh)
             previous_zh = translations.get(len(batch_blocks), "")
             if terms:
@@ -447,7 +451,7 @@ def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base
 
 
 def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
-                     batch_size=0, paper_id="", executor=None):
+                     batch_size=0, paper_id="", executor=None, cache=None):
     """Translate parsed blocks.
 
     batch_size > 0: legacy fixed-size batch mode.
@@ -467,11 +471,14 @@ def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
                for b in blocks]
 
     cache_hits = 0
-    if paper_id:
+    if paper_id or cache is not None:
         for i, b in enumerate(blocks):
             if b.type in SKIP_TYPES or len(b.text) < 10:
                 continue
-            cached = translation_cache.get(paper_id, b.text)
+            if cache is not None:
+                cached = cache.get_zh(b.text)
+            else:
+                cached = translation_cache.get(paper_id, b.text)
             if cached:
                 results[i]["zh"] = cached
                 cache_hits += 1
@@ -479,10 +486,10 @@ def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
     try:
         if batch_size > 0:
             _translate_in_batches(blocks, results, paper_title, term_dict,
-                                  api_key, base_url, model, batch_size, paper_id, cache_hits)
+                                  api_key, base_url, model, batch_size, paper_id, cache_hits, cache=cache)
         else:
             _translate_by_sections(blocks, results, paper_title, term_dict,
-                                   api_key, base_url, model, paper_id, cache_hits, executor)
+                                   api_key, base_url, model, paper_id, cache_hits, executor, cache=cache)
     except Exception as e:
         print(f"  ✗ translate_blocks FAILED: {e}", flush=True)
         raise

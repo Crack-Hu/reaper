@@ -9,7 +9,12 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
   function log(msg) { Zotero.debug("Reaper: " + msg); }
   function pref(key, fallback) { try { var v = Zotero.Prefs.get(PREFS + key); return (v != null) ? v : fallback; } catch (e) { return fallback; } }
   function serverURL() { return "http://localhost:" + pref("serverPort", "16625"); }
-  function buildTitle(arxivID) { return pref("attachmentName", "Reaper: {arxiv_id}").replace("{arxiv_id}", arxivID); }
+  function buildTitle(arxivID, source, light) {
+    var name = pref("attachmentName", "Reaper: {arxiv_id}").replace("{arxiv_id}", arxivID);
+    if (source) name += "_" + source;
+    if (light) name += "_light";
+    return name;
+  }
 
   var chromeHandle;
 
@@ -58,6 +63,32 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
           { menuType: "menuitem",
             onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "Generate Bilingual HTML (Light)"); ctx.setVisible(true); },
             onCommand: generateBilingualLightAction },
+          { menuType: "submenu", id: "reaper-source-submenu",
+            onShowing: function(_e, ctx) {
+              ctx.menuElem.setAttribute("label", "Generate from Source");
+              ctx.setVisible(true);
+            },
+            menus: [
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "arxiv (Full)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("arxiv_html"); } },
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "arxiv (Light)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("arxiv_html", true); } },
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5iv (Full)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("ar5iv"); } },
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5iv (Light)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("ar5iv", true); } },
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5ivist (Full)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("ar5ivist_docker"); } },
+              { menuType: "menuitem",
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5ivist (Light)"); ctx.setVisible(true); },
+                onCommand: function() { generateFromSourceAction("ar5ivist_docker", true); } },
+            ],
+          },
         ],
       }],
     });
@@ -128,6 +159,14 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     }
   }
 
+  async function generateFromSourceAction(source, light) {
+    var zp = Zotero.getActiveZoteroPane(), items;
+    if (!zp || !(items = zp.getSelectedItems())) return;
+    for (var i = 0; i < items.length; i++) {
+      try { await processItem(items[i], light, source); } catch (e) { log("err: " + e); }
+    }
+  }
+
   // ──── arxiv & PDF ──────────────────
 
   async function importFromArxiv(arxivID, collection) {
@@ -189,7 +228,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     }
   }
 
-  async function processItem(item, light) {
+  async function processItem(item, light, source) {
     if (!item.isRegularItem()) { log("processItem: not a regular item"); return; }
     var arxivID = extractArxivIDFromItem(item);
 
@@ -202,7 +241,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       if (!arxivID) { flash("Reaper", "Could not extract arxiv ID from input."); return; }
     }
 
-    var title = buildTitle(arxivID) + (light ? "_light" : "");
+    var title = buildTitle(arxivID, source, light);
 
     // Check if already has a Reaper attachment
     var atts = item.getAttachments();
@@ -231,13 +270,17 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       } catch (e) { log("clear err: " + e); }
     }
 
-    log("Generating " + arxivID + " from " + serverURL());
+    log("Generating " + arxivID + (source ? " from " + source : "") + " via " + serverURL());
 
     // Show persistent progress window
     var pw;
     try { pw = new Zotero.ProgressWindow(); pw.changeHeadline("Reaper"); pw.addDescription("Translating " + arxivID + " ..."); pw.show(); } catch (e) {}
 
-    var html, fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID + (light ? "&embed_images=0" : "");
+    var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
+    if (light) fetchURL += "&embed_images=0";
+    if (source) fetchURL += "&source=" + source;
+
+    var html;
     try {
       var resp = await fetch(fetchURL);
       log("fetch status: " + resp.status);

@@ -16,7 +16,7 @@ from .. import config
 
 AR5IV_BASE = "https://ar5iv.labs.arxiv.org"
 UI_DIR = Path(__file__).parent / "ui"  # toc-sidebar.css, toc-toggle.js
-CSS_CACHE = Path(__file__).parent.parent.parent / "data" / "css"  # data/css/
+CSS_CACHE = Path(__file__).parent / "arxiv_css"  # src/rendering/arxiv_css/
 CSS_FILES = {
     "core": "/assets/ar5iv.0.8.5.css",
     "fonts": "/assets/ar5iv-fonts.0.8.4.css",
@@ -29,9 +29,68 @@ _BASE64_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"
                 ".svg": "image/svg+xml", ".gif": "image/gif"}
 
 
-def _fetch(url: str) -> bytes:
-    """Fetch a URL, return bytes."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Reaper/1.0"})
+def _extract_page_url(html: str, arxiv_id: str, source_type: str) -> str:
+    """Extract the canonical page URL from HTML metadata.
+
+    Uses <link rel="canonical">, <meta property="og:url">, or constructs
+    from source type + arxiv ID. Used as Referer for image requests.
+    """
+    import re
+    # Try <link rel="canonical">
+    m = re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html)
+    if m:
+        return m.group(1)
+    # Try <meta property="og:url">
+    m = re.search(r'<meta[^>]*property=["\']og:url["\'][^>]*content=["\']([^"\']+)["\']', html)
+    if m:
+        return m.group(1)
+    # Construct from known patterns
+    if source_type == "arxiv_html":
+        return f"https://arxiv.org/html/{arxiv_id}"
+    return f"{AR5IV_BASE}/{arxiv_id}"
+
+
+def _is_image_data(data: bytes) -> bool:
+    """Check if raw bytes look like an image, not an HTML error page."""
+    if not data:
+        return False
+    # Common image magic bytes
+    if data[:4] == b'\x89PNG':    # PNG
+        return True
+    if data[:2] == b'\xff\xd8':   # JPEG
+        return True
+    if data[:3] == b'GIF':        # GIF
+        return True
+    if data[:4] == b'<svg':       # SVG (text)
+        return True
+    # Reject HTML, XML declarations
+    if data[:15].startswith(b'<!') or data[:9].lower().startswith(b'<html'):
+        return False
+    # Unknown — accept (could be a new image format)
+    return True
+
+
+def _resolve_image_url(url: str, arxiv_id: str, source_type: str) -> str:
+    """Convert a relative image URL to an absolute CDN URL.
+
+    Used by both Full mode (fallback when download fails) and Light mode
+    (all images are rewritten to absolute URLs).
+    """
+    if url.startswith("http"):
+        return url
+    if url.startswith("/"):
+        domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
+        return domain + url
+    domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
+    return f"{domain}/html/{arxiv_id}/{url}"
+
+
+def _fetch(url: str, referer: str = "") -> bytes:
+    """Fetch a URL, return bytes. Optionally set Referer header."""
+    headers = {"User-Agent": "Reaper/1.0"}
+    if referer:
+        headers["Referer"] = referer
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read()
 
@@ -75,11 +134,13 @@ def _strip_arxiv_brand(html: str) -> str:
     return html
 
 
-def _inline_images(html: str, arxiv_id: str = "", source_type: str = "ar5iv") -> str:
+def _inline_images(html: str, arxiv_id: str = "", source_type: str = "ar5iv",
+                   page_url: str = "") -> str:
     """Download images and embed as base64 data URIs.
 
     ar5iv/arxiv_html: download from CDN, cache to data/ar5iv/{id}/
     ar5ivist_docker: read from data/ar5ivist/{id}/
+    page_url: canonical page URL for Referer header
     """
     if source_type == "ar5ivist_docker":
         img_dir = Path(config.AR5IVIST_OUTPUT_DIR) / arxiv_id
@@ -100,38 +161,48 @@ def _inline_images(html: str, arxiv_id: str = "", source_type: str = "ar5iv") ->
                 fname = url.split("/")[-1] if "/" in url else url
                 local = img_dir / fname
                 if local.exists():
+                    raw = local.read_bytes()
+                    if not _is_image_data(raw):
+                        raise ValueError(f"cached file is not an image: {fname}")
                     ext = local.suffix.lower()
                     mime = _BASE64_MIME.get(ext, "image/png")
-                    data = base64.b64encode(local.read_bytes()).decode()
+                    data = base64.b64encode(raw).decode()
                     return url, f"data:{mime};base64,{data}"
-            # Resolve to absolute if needed (URL from HTML is already correct)
-            if url.startswith("http"):
-                full_url = url
-            elif url.startswith("/"):
-                domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
-                full_url = domain + url
-            else:
-                domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
-                full_url = f"{domain}/html/{arxiv_id}/{url}"
+            full_url = _resolve_image_url(url, arxiv_id, source_type)
+            raw = _fetch(full_url, referer=page_url)
+            if not _is_image_data(raw):
+                raise ValueError(f"downloaded content is not an image: {full_url}")
             ext = url.rsplit(".", 1)[-1].lower()
             mime = _BASE64_MIME.get("." + ext, "image/png")
-            data = base64.b64encode(_fetch(full_url)).decode()
+            data = base64.b64encode(raw).decode()
             # Cache to disk
             img_dir.mkdir(parents=True, exist_ok=True)
             fname = url.split("/")[-1]
-            (img_dir / fname).write_bytes(base64.b64decode(data))
+            (img_dir / fname).write_bytes(raw)
             return url, f"data:{mime};base64,{data}"
         except Exception:
-            return url, url
+            # Inline failed — rewrite to absolute URL so the image
+            # is at least reachable when viewed with network access
+            return url, _resolve_image_url(url, arxiv_id, source_type)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(download_one, u) for u in urls]
+        total = len(urls)
+        done_count = 0
+        last_pct = 0
         for f in as_completed(futures):
             url, b64 = f.result()
             url_to_b64[url] = b64
+            done_count += 1
+            pct = done_count * 100 // total
+            if pct >= last_pct + 10 or done_count == total:
+                bar = "#" * (pct // 5) + "-" * ((100 - pct) // 5)
+                embedded_so_far = sum(1 for v in url_to_b64.values() if v.startswith("data:"))
+                print(f"        embed [{bar}] {done_count}/{total} ({embedded_so_far} inlined)", flush=True)
+                last_pct = pct - (pct % 10)
 
     embedded = sum(1 for v in url_to_b64.values() if v.startswith("data:"))
-    print(f"        {embedded}/{len(urls)} embedded", flush=True)
+    print(f"        done: {embedded}/{len(urls)} embedded", flush=True)
 
     def replacer(m):
         src = m.group(1)
@@ -266,7 +337,7 @@ def render_bilingual_html(
     """
     html = marked_html
     is_arxiv = (source_type == "arxiv_html" or
-                (source_type == "cache" and "ltx_page_navbar" in marked_html))
+                ("ltx_page_navbar" in marked_html))
 
     # 1. arxiv_html: strip arXiv brand scripts, fix TOC links, wrap content
     if is_arxiv:
@@ -288,14 +359,19 @@ def render_bilingual_html(
     html, core_css = _inline_css(html)
 
     # 3. Images: embed or fix paths to absolute
+    page_url = _extract_page_url(marked_html, arxiv_id, source_type)
     if embed_images:
-        html = _inline_images(html, arxiv_id, source_type)
+        html = _inline_images(html, arxiv_id, source_type, page_url=page_url)
     else:
-        # Fix relative image paths to absolute for standalone HTML
-        if source_type == "arxiv_html":
-            html = html.replace('src="/', 'src="https://arxiv.org/')
-        else:
-            html = html.replace('src="/', f'src="{AR5IV_BASE}/')
+        # Light mode: rewrite ALL relative image paths to absolute CDN URLs
+        # Use the same URL resolution logic as Full mode's fallback
+        def _fix_img_src(m):
+            src = m.group(1)
+            if src.startswith("data:") or src.startswith("http"):
+                return m.group(0)
+            new_src = _resolve_image_url(src, arxiv_id, source_type)
+            return m.group(0).replace(f'src="{src}"', f'src="{new_src}"')
+        html = _IMG_PATTERN.sub(_fix_img_src, html)
 
     # 3. Build TOC from blocks (ar5iv/ar5ivist: generate; arxiv_html: already in HTML)
     toc_entries = [(i, b) for i, b in enumerate(blocks_with_zh)

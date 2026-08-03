@@ -49,7 +49,7 @@ def arxiv_id_from_url(url: str) -> str:
 # ── Source: ar5iv 在线 ─────────────────────────────────────────
 
 def _try_ar5iv(arxiv_id: str) -> str:
-    """从 ar5iv.labs.arxiv.org 获取 HTML。"""
+    """从 ar5iv.labs.arxiv.org 获取 HTML 并缓存图片。"""
     url = f"{config.AR5IV_BASE}/{arxiv_id}"
     resp = httpx.get(url, follow_redirects=True, timeout=30)
     resp.raise_for_status()
@@ -68,7 +68,79 @@ def _try_ar5iv(arxiv_id: str) -> str:
         if 'arxiv.org/abs/' in html[:2000]:
             raise SourceError(f"ar5iv returned arXiv abstract page for {arxiv_id}")
 
+    # Download referenced images to local cache (ar5iv CDN may not persist them)
+    _cache_ar5iv_images(html, arxiv_id)
+
     return html
+
+
+def _cache_ar5iv_images(html: str, arxiv_id: str):
+    """Download all <img> files referenced in ar5iv HTML to local cache.
+
+    ar5iv generates images during LaTeXML conversion as temporary files.
+    They may not be available later from CDN, so we cache them immediately.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    img_dir = Path(config.AR5IV_DIR) / arxiv_id
+    urls = set(re.findall(r'<img[^>]*src="([^"]+)"', html))
+    urls = {u for u in urls if not u.startswith('data:') and not u.startswith('http')}
+    if not urls:
+        return
+
+    img_dir.mkdir(parents=True, exist_ok=True)
+    total = len(urls)
+    progress = {"ok": 0, "fail": 0, "lock": threading.Lock()}
+    last_milestone = [0]
+
+    # Extract canonical page URL from HTML for Referer
+    import re as _re
+    _page_url = ""
+    _m = _re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html)
+    if _m:
+        _page_url = _m.group(1)
+    else:
+        _m = _re.search(r'<meta[^>]*property=["\']og:url["\'][^>]*content=["\']([^"\']+)["\']', html)
+        if _m:
+            _page_url = _m.group(1)
+        else:
+            _page_url = f"{config.AR5IV_BASE}/{arxiv_id}"
+
+    def _dl(u):
+        fname = u.split('/')[-1]
+        local = img_dir / fname
+        if local.exists():
+            with progress["lock"]:
+                progress["ok"] += 1
+            return
+        try:
+            full_url = f"{config.AR5IV_BASE}/{arxiv_id}/{u}"
+            headers = {"Referer": _page_url} if _page_url else {}
+            img_data = httpx.get(full_url, timeout=15, headers=headers).content
+            # Validate: reject HTML error pages pretending to be images
+            if img_data[:15].startswith(b'<!') or img_data[:9].lower().startswith(b'<html'):
+                with progress["lock"]:
+                    progress["fail"] += 1
+                return
+            local.write_bytes(img_data)
+            with progress["lock"]:
+                progress["ok"] += 1
+        except Exception:
+            with progress["lock"]:
+                progress["fail"] += 1
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_dl, u) for u in urls]
+        for f in as_completed(futures):
+            f.result()  # raise if any exception (ours are caught inside)
+            with progress["lock"]:
+                done = progress["ok"] + progress["fail"]
+                pct = done * 100 // total
+                # Print at every 10% milestone (10,20,30...)
+                if pct >= last_milestone[0] + 10 or done == total:
+                    bar = "#" * (pct // 5) + "-" * ((100 - pct) // 5)
+                    print(f"          images [{bar}] {done}/{total}", flush=True)
+                    last_milestone[0] = pct - (pct % 10)  # snap to last milestone
 
 
 # ── Source: ar5ivist Docker ────────────────────────────────────
@@ -203,6 +275,19 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
         output_html = new_path
 
     html = output_html.read_text(encoding="utf-8")
+
+    # Detect SVG-only output (LaTeXML conversion failure: no text, only graphics)
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text).strip()
+    svg_paths = html.count('<path ')
+    # Heuristic: >50 SVG paths but <200 chars of text → pure graphics, no content
+    if svg_paths > 50 and len(text) < 200:
+        raise SourceError(
+            f"ar5ivist produced SVG-only output ({svg_paths} paths, "
+            f"{len(text)} chars text). LaTeXML conversion failed for this paper. "
+            f"See raw output: {output_html}"
+        )
+
     return html
 
 
@@ -221,25 +306,6 @@ def _try_arxiv_html(arxiv_id: str) -> str:
     return html
 
 
-def _cache_ar5iv_css(css_path: Path):
-    """Copy ar5iv CSS from global cache to paper directory."""
-    import shutil
-    css_dir = Path(config.DATA_DIR) / "css"
-    merged = css_dir / "ar5iv-merged.css"
-    if merged.exists():
-        shutil.copy(merged, css_path)
-    else:
-        # Merge individual files on first call
-        parts = []
-        for f in sorted(css_dir.glob("ar5iv*.css")):
-            parts.append(f.read_text(encoding="utf-8"))
-        if parts:
-            merged.write_text("\n".join(parts), encoding="utf-8")
-            shutil.copy(merged, css_path)
-
-
-# ── 主入口 ─────────────────────────────────────────────────────
-
 # Source dispatcher
 _SOURCES = {
     "ar5iv": _try_ar5iv,
@@ -248,15 +314,18 @@ _SOURCES = {
 }
 
 
-def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None) -> tuple[str, str, str]:
+def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
+               force_source: str | None = None) -> tuple[str, str, str]:
     """获取 HTML 内容，按 sources 优先级依次尝试。
 
-    顺序: ① 缓存 → ② config.sources（逐一下载/生成）→ ③ 全部失败则抛异常
+    force_source: override the source order (e.g. "ar5iv", "arxiv_html").
+                  Skips cache when set since cached content may be from a different source.
     """
     arxiv_id = arxiv_id_from_url(arxiv_id_or_url)
 
     # 检查缓存
-    if cache_dir:
+    # Skip cache when forcing a specific source (may differ from cached)
+    if cache_dir and not force_source:
         cache_path = Path(cache_dir) / arxiv_id / f"{arxiv_id}.html"
         if cache_path.exists():
             html = cache_path.read_text(encoding="utf-8")
@@ -266,11 +335,32 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None) -> tuple[str,
             if '<body' in html and 'ltx_page_main' not in html and 'ltx_ERROR' not in html:
                 if 'arxiv.org/abs/' in html[:2000]:
                     raise SourceError(f"cached file is arXiv page, not ar5iv HTML ({arxiv_id})")
-            print(f"        (cached)", flush=True)
-            return arxiv_id, "cache", html
+            # Try to recall original source type from PaperCache
+            cached_src = "unknown"
+            try:
+                from src.translation.cache import PaperCache
+                pc = PaperCache.load(arxiv_id)
+                if pc.src_type:
+                    cached_src = pc.src_type
+            except Exception:
+                pass
+            # Fallback: detect source from HTML content
+            if cached_src == "unknown":
+                if "ltx_page_navbar" in html or 'arxiv.org/html' in html[:5000]:
+                    cached_src = "arxiv_html"
+                elif "ltx_page_main" in html:
+                    cached_src = "ar5iv"
+            print(f"        (cached from {cached_src})", flush=True)
+            # Try to cache images even for cached HTML (may have been missed on first fetch)
+            _cache_ar5iv_images(html, arxiv_id)
+            return arxiv_id, cached_src, html
 
     # 按优先级尝试各来源
-    sources = config.SOURCES
+    if force_source:
+        sources = [{"type": force_source}]
+        print(f"        (forced source: {force_source})", flush=True)
+    else:
+        sources = config.SOURCES
     errors = []
     for i, src_cfg in enumerate(sources):
         src_type = src_cfg["type"]
@@ -285,10 +375,6 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None) -> tuple[str,
                 paper_dir = Path(cache_dir) / arxiv_id
                 paper_dir.mkdir(parents=True, exist_ok=True)
                 (paper_dir / f"{arxiv_id}.html").write_text(html, encoding="utf-8")
-                # Also cache ar5iv CSS if not already present
-                css_path = paper_dir / "ar5iv.css"
-                if not css_path.exists():
-                    _cache_ar5iv_css(css_path)
 
             return arxiv_id, src_type, html
         except SourceError as e:

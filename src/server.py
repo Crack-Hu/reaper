@@ -121,22 +121,28 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             self._respond_json({"ok": True, "cleared": cleared})
             return
 
-        # /api/generate?arxiv_id=XXXX&embed_images=0
+        # /api/generate?arxiv_id=XXXX&embed_images=0&source=ar5iv
         if parsed.path == "/api/generate":
             qs = urllib.parse.parse_qs(parsed.query)
             arxiv_id = qs.get("arxiv_id", [None])[0]
             embed = qs.get("embed_images", ["1"])[0] != "0"
+            source = qs.get("source", [None])[0]  # None = use default order
             if not arxiv_id:
                 self._respond_json({"error": "missing arxiv_id"}, 400)
                 return
 
             # Generate complete HTML first, then send
             try:
-                html = self._generate_paper(arxiv_id, embed_images=embed)
-                # Save to papers/
+                html = self._generate_paper(arxiv_id, embed_images=embed, force_source=source)
+                # Save with source-aware filename
                 from src.rendering.renderer import save_html
                 import os as _os
-                out_path = _os.path.join(config.ZOTERO_DIR, f"{arxiv_id}.html")
+                suffix = ""
+                if source:
+                    suffix += f"_{source}"
+                if not embed:
+                    suffix += "_light"
+                out_path = _os.path.join(config.ZOTERO_DIR, f"{arxiv_id}{suffix}.html")
                 save_html(html, out_path)
                 self._respond_html(html)
             except Exception as e:
@@ -215,71 +221,106 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
         self._respond_json({"error": "not found"}, 404)
 
-    def _generate_paper(self, arxiv_id: str, embed_images: bool = True) -> str:
-        """Run the full pipeline with state tracking."""
+    def _generate_paper(self, arxiv_id: str, embed_images: bool = True, force_source: str | None = None) -> str:
+        """Run the full pipeline with state tracking.
+
+        Args:
+            arxiv_id: paper ID
+            embed_images: True = base64 inline, False = CDN URLs
+            force_source: override default source order (e.g. "ar5iv", "arxiv_html")
+        """
         from src.ingestion.fetcher import fetch_html
         from src.ingestion.parser import mark_and_extract
         from src.translation.translator import translate_blocks
         from src.translation.dictionary import TermDictionary
-        from src.translation.cache import TranslationCache
+        from src.translation.cache import PaperCache, html_hash
         from src.rendering.renderer import render_bilingual_html
         from src.task import Task
         from src import config
-        import hashlib
 
         tag = f"[{arxiv_id}]"
         tasks_dir = os.path.join(config.DATA_DIR, "tasks")
         task = Task.load(arxiv_id, tasks_dir)
         _active_tasks[arxiv_id] = task
 
-        if task.is_done:
-            print(f"  {tag} Task already done — using cached data", flush=True)
-
-        # Step 1: Fetch (cached to data/ar5iv/ for instant re-runs)
-        print(f"  {tag} [1/4] Fetching ar5iv HTML ...", flush=True)
+        # Step 1: Fetch
+        print(f"  {tag} [1/4] Fetching HTML ...", flush=True)
         task.set_fetching()
-        arxiv_id, src_type, raw_html = fetch_html(arxiv_id, cache_dir=str(config.AR5IV_DIR))
+        arxiv_id, src_type, raw_html = fetch_html(arxiv_id, cache_dir=str(config.AR5IV_DIR),
+                                                         force_source=force_source)
         print(f"  {tag}        {len(raw_html):,} bytes", flush=True)
 
-        # Step 2: Parse
-        print(f"  {tag} [2/4] Parsing blocks ...", flush=True)
-        task.set_parsing()
-        marked_html, blocks = mark_and_extract(raw_html)
-        print(f"  {tag}        {len(blocks)} blocks extracted", flush=True)
-
-        # Compute hashes and init task blocks
-        hashes = [hashlib.sha256(b.text.encode()).hexdigest()[:16] for b in blocks]
-        if not task.blocks:
-            task.set_blocks(hashes)
-
-        # Step 3: Translate
-        print(f"  {tag} [3/4] Translating ...", flush=True)
-        task.set_translating()
+        # Load unified paper cache
+        paper_cache = PaperCache.load(arxiv_id)
         term_dict = TermDictionary()
 
-        # Use in-memory translation cache
-        zh_cache = TranslationCache(arxiv_id)
-        _active_caches[arxiv_id] = zh_cache
-        print(f"  {tag}        {len(zh_cache)} cached translations loaded", flush=True)
-
-        translated = translate_blocks(
-            blocks, term_dict=term_dict, paper_id=arxiv_id,
-            api_key=config.LLM_API_KEY,
-            model=config.LLM_MODEL,
-            base_url=config.LLM_BASE_URL,
-            executor=get_translation_pool(),
-        )
-
-        # Update task progress from results
-        _active_caches.pop(arxiv_id, None)  # clean registry (already saved per-paragraph)
-        for i, t in enumerate(translated):
-            t["math_map"] = blocks[i].math_map if i < len(blocks) else {}
-            if t.get("zh") and t["zh"] != t.get("en", ""):
-                if i < len(task.blocks) and not task.blocks[i]["done"]:
+        # Check if HTML hash matches → skip parse + translate entirely
+        if paper_cache.match(raw_html):
+            print(f"  {tag} [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
+            task.set_parsing()
+            task.set_translating()
+            marked_html, _ = mark_and_extract(raw_html)  # re-parse for markers only
+            cached_blocks = paper_cache.restore()
+            translated = [{"en": b["en"], "zh": b["zh"], "type": b["type"],
+                           "level": b["level"], "label": b["label"],
+                           "math_map": b.get("math_map", {})}
+                          for b in cached_blocks]
+            # Update task for UI progress
+            hashes = [b["hash"] for b in cached_blocks]
+            if not task.blocks:
+                task.set_blocks(hashes)
+                done_indices = [i for i, b in enumerate(cached_blocks) if b.get("zh")]
+                for i in done_indices:
                     task.mark_done(i)
+        else:
+            # Step 2: Parse
+            print(f"  {tag} [2/4] Parsing blocks ...", flush=True)
+            task.set_parsing()
+            marked_html, blocks = mark_and_extract(raw_html)
+            print(f"  {tag}        {len(blocks)} blocks extracted", flush=True)
 
-        cnt = sum(1 for t in translated if t.get("zh") and t["zh"] != t.get("en", ""))
-        print(f"  {tag}        {cnt} blocks translated (task: {task.progress})", flush=True)
+            # Update cache with new HTML hash + blocks (merges old translations by hash)
+            paper_cache.update(raw_html, src_type, blocks)
+            paper_cache.save()
+            matched = sum(1 for b in paper_cache.blocks if b.get("zh"))
+            if matched:
+                print(f"  {tag}        {matched}/{len(blocks)} blocks matched from previous cache", flush=True)
+
+            # Compute hashes and init task blocks
+            hashes = [b["hash"] for b in paper_cache.blocks]
+            if not task.blocks:
+                task.set_blocks(hashes)
+
+            # Step 3: Translate
+            print(f"  {tag} [3/4] Translating ...", flush=True)
+            task.set_translating()
+
+            _active_caches[arxiv_id] = paper_cache
+            print(f"  {tag}        {paper_cache.translated_count} cached translations loaded", flush=True)
+
+            translated = translate_blocks(
+                blocks, term_dict=term_dict, paper_id=arxiv_id,
+                api_key=config.LLM_API_KEY,
+                model=config.LLM_MODEL,
+                base_url=config.LLM_BASE_URL,
+                executor=get_translation_pool(),
+                cache=paper_cache,
+            )
+
+            # Update task progress from results
+            _active_caches.pop(arxiv_id, None)
+            for i, t in enumerate(translated):
+                t["math_map"] = blocks[i].math_map if i < len(blocks) else {}
+                if t.get("zh") and t["zh"] != t.get("en", ""):
+                    if i < len(task.blocks) and not task.blocks[i]["done"]:
+                        task.mark_done(i)
+
+            # Merge translations back into cache
+            paper_cache.merge_translations(translated)
+            paper_cache.save()
+
+            cnt = sum(1 for t in translated if t.get("zh") and t["zh"] != t.get("en", ""))
+            print(f"  {tag}        {cnt} blocks translated (task: {task.progress})", flush=True)
 
         # Step 4: Render
         print(f"  {tag} [4/4] Rendering HTML ...", flush=True)
@@ -322,7 +363,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
 # ── Shared translation pool (one per server process) ──
 _translation_pool = None
-_active_caches: dict[str, "TranslationCache"] = {}  # paper_id → cache
+_active_caches: dict[str, "PaperCache"] = {}  # paper_id → cache
 _active_tasks: dict[str, "Task"] = {}  # paper_id → task
 
 def get_translation_pool():

@@ -20,6 +20,9 @@ Thumbs.db
 # ── Reaper generated (all intermediates) ──
 data/
 
+# ── Downloaded CSS cache ──
+src/rendering/arxiv_css/
+
 # ── Pi ──
 .pi/
 
