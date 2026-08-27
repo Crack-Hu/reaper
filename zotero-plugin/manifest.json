@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Reaper for Zotero",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Auto-generate bilingual paper HTML via Reaper server.",
   "applications": {
     "zotero": {

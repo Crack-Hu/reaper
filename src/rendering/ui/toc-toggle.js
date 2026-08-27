@@ -12,6 +12,14 @@ document.addEventListener("DOMContentLoaded",function(){
     themeBtn.title = "Toggle dark/light mode";
     bar.appendChild(themeBtn);
 
+    // Source toggle button (added by reaper-source-toggle.js logic)
+    var srcBtn = document.createElement("button");
+    srcBtn.id = "reaper-source-btn";
+    srcBtn.innerHTML = "\u25CE";
+    srcBtn.title = "Switch to CDN";
+    srcBtn.onclick = function(){ if(window.toggleReaperSource) toggleReaperSource(); };
+    bar.appendChild(srcBtn);
+
     document.body.insertBefore(bar, document.body.firstChild);
 
     var tocOpen = false;

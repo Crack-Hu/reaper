@@ -5,7 +5,6 @@ import re
 import subprocess
 import tarfile
 import os
-import time as _time
 import threading
 from pathlib import Path
 from .. import config
@@ -84,6 +83,7 @@ def _cache_ar5iv_images(html: str, arxiv_id: str):
     import threading
     img_dir = Path(config.AR5IV_DIR) / arxiv_id
     urls = set(re.findall(r'<img[^>]*src="([^"]+)"', html))
+    urls |= set(re.findall(r'<object[^>]*data="([^"]+)"', html))
     urls = {u for u in urls if not u.startswith('data:') and not u.startswith('http')}
     if not urls:
         return
@@ -218,17 +218,13 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-        idle_timeout = getattr(config, 'AR5IVIST_IDLE_TIMEOUT', 600)
-
         last_line = [""]
-        last_output_at = [_time.time()]
 
         def _log_progress():
             for line in proc.stdout:
                 log_f.write(line)
                 log_f.flush()
                 last_line[0] = line.rstrip()[-80:]
-                last_output_at[0] = _time.time()
 
         t = threading.Thread(target=_log_progress, daemon=True)
         t.start()
@@ -238,25 +234,11 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             t.join(timeout=15)
             dots += 1
             tail = last_line[0]
-            idle = _time.time() - last_output_at[0]
             elapsed = dots * 15
             if tail:
                 print(f"          [{elapsed}s] {tail}", flush=True)
             else:
-                print(f"          [{elapsed}s] waiting... (idle {idle:.0f}s / limit {idle_timeout}s)", flush=True)
-
-            if idle > idle_timeout:
-                print(f"          ⚠ idle timeout ({idle_timeout}s) — killing docker container", flush=True)
-                proc.kill()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
-                raise SourceError(
-                    f"ar5ivist docker timed out after {elapsed}s "
-                    f"(no log output for {idle:.0f}s, threshold {idle_timeout}s). "
-                    f"Full log: {log_path}"
-                )
+                print(f"          [{elapsed}s] (no output)", flush=True)
 
         t.join(timeout=5)
         print(f"          docker exit: {proc.returncode}", flush=True)
@@ -315,13 +297,46 @@ _SOURCES = {
 
 
 def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
-               force_source: str | None = None) -> tuple[str, str, str]:
+               force_source: str | None = None) -> "FetchedPage":
     """获取 HTML 内容，按 sources 优先级依次尝试。
+
+    Returns a FetchedPage with html, source_type, arxiv_id, img_dir, page_url.
 
     force_source: override the source order (e.g. "ar5iv", "arxiv_html").
                   Skips cache when set since cached content may be from a different source.
     """
+    from .fetched_page import FetchedPage
+
     arxiv_id = arxiv_id_from_url(arxiv_id_or_url)
+
+    def _build_fp(src_type: str, html: str) -> FetchedPage:
+        img_dir = Path(config.AR5IV_DIR) / arxiv_id
+        # Derive page_url from HTML metadata first, then fall back to source type
+        page_url = ""
+        # Try <link rel="canonical">
+        m = re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html)
+        if m:
+            page_url = m.group(1)
+        # Try <base href="...">
+        if not page_url:
+            m = re.search(r'<base\s+href="([^"]+)"', html)
+            if m:
+                page_url = m.group(1)
+        # Fall back to source type
+        if not page_url:
+            if src_type == "arxiv_html":
+                page_url = f"https://arxiv.org/html/{arxiv_id}"
+            elif src_type == "ar5iv":
+                page_url = f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"
+            else:
+                page_url = f"https://arxiv.org/abs/{arxiv_id}"
+        return FetchedPage(
+            arxiv_id=arxiv_id,
+            source_type=src_type,
+            html=html,
+            img_dir=img_dir,
+            page_url=page_url,
+        )
 
     # 检查缓存
     # Skip cache when forcing a specific source (may differ from cached)
@@ -353,7 +368,7 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
             print(f"        (cached from {cached_src})", flush=True)
             # Try to cache images even for cached HTML (may have been missed on first fetch)
             _cache_ar5iv_images(html, arxiv_id)
-            return arxiv_id, cached_src, html
+            return _build_fp(cached_src, html)
 
     # 按优先级尝试各来源
     if force_source:
@@ -376,7 +391,7 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
                 paper_dir.mkdir(parents=True, exist_ok=True)
                 (paper_dir / f"{arxiv_id}.html").write_text(html, encoding="utf-8")
 
-            return arxiv_id, src_type, html
+            return _build_fp(src_type, html)
         except SourceError as e:
             print(f"             failed: {e}", flush=True)
             errors.append(f"{src_type}: {e}")

@@ -4,11 +4,10 @@ All external resources (CSS, images, fonts) are embedded inline.
 No network access needed after generation.
 """
 
-import base64
 import json
 import os
 import re
-import urllib.request
+import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..ingestion.parser import restore_math_in_translation
@@ -21,33 +20,35 @@ CSS_FILES = {
     "core": "/assets/ar5iv.0.8.5.css",
     "fonts": "/assets/ar5iv-fonts.0.8.4.css",
 }
-SITE_CSS = "/assets/ar5iv-site.0.2.2.css"  # removed — navigation chrome only
 
-_IMG_PATTERN = re.compile(r'<img\b[^>]*src="([^"]+)"[^>]*>')
+# ── Generic resource scanning ──────────────────────────────────────
+# Instead of enumerating tag types, we scan for attributes that commonly
+# hold external resource URLs. This avoids whack-a-mole with new tag types.
+
+RESOURCE_ATTRS = {'src', 'data', 'poster'}
+
+# Match any tag that has one of the resource attributes.
+# Captures: (tag_name, attr_name, attr_value)
+_RESOURCE_PATTERN = re.compile(
+    r'<(\w+)\b[^>]*(?:' + '|'.join(RESOURCE_ATTRS) + r')="([^"]+)"[^>]*>'
+)
+
 _CSS_LINK_PATTERN = re.compile(r'<link\b[^>]*href="([^"]*)"[^>]*>')
-_BASE64_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".svg": "image/svg+xml", ".gif": "image/gif"}
 
 
-def _extract_page_url(html: str, arxiv_id: str, source_type: str) -> str:
-    """Extract the canonical page URL from HTML metadata.
-
-    Uses <link rel="canonical">, <meta property="og:url">, or constructs
-    from source type + arxiv ID. Used as Referer for image requests.
-    """
-    import re
-    # Try <link rel="canonical">
-    m = re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html)
-    if m:
-        return m.group(1)
-    # Try <meta property="og:url">
-    m = re.search(r'<meta[^>]*property=["\']og:url["\'][^>]*content=["\']([^"\']+)["\']', html)
-    if m:
-        return m.group(1)
-    # Construct from known patterns
-    if source_type == "arxiv_html":
-        return f"https://arxiv.org/html/{arxiv_id}"
-    return f"{AR5IV_BASE}/{arxiv_id}"
+def _is_downloadable_url(value: str) -> bool:
+    """Check if an attribute value is a downloadable external resource."""
+    if not value:
+        return False
+    if value.startswith('data:'):
+        return False
+    if value.startswith('#'):
+        return False
+    if value.startswith('javascript:'):
+        return False
+    if value.startswith('mailto:'):
+        return False
+    return True
 
 
 def _is_image_data(data: bytes) -> bool:
@@ -70,29 +71,37 @@ def _is_image_data(data: bytes) -> bool:
     return True
 
 
-def _resolve_image_url(url: str, arxiv_id: str, source_type: str) -> str:
+def _resolve_image_url(url: str, fp: "FetchedPage") -> str:
     """Convert a relative image URL to an absolute CDN URL.
 
-    Used by both Full mode (fallback when download fails) and Light mode
-    (all images are rewritten to absolute URLs).
+    Uses fp.page_url as the base for resolving relative URLs.
     """
-    if url.startswith("http"):
+    if url.startswith("http") or url.startswith("data:"):
         return url
     if url.startswith("/"):
-        domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
+        # Absolute path — prepend domain
+        domain = "https://arxiv.org" if fp.source_type == "arxiv_html" else AR5IV_BASE
         return domain + url
-    domain = "https://arxiv.org" if source_type == "arxiv_html" else AR5IV_BASE
-    return f"{domain}/html/{arxiv_id}/{url}"
+    # Relative path — resolve against the source's HTML root
+    # Strip any arxiv ID prefix (with or without version) from the path
+    clean_url = url
+    # Remove leading arxiv ID pattern like "2307.14989" or "2307.14989v6"
+    m = re.match(r'^\d{4}\.\d+(v\d+)?/', clean_url)
+    if m:
+        clean_url = clean_url[m.end():]
+    domain = "https://arxiv.org" if fp.source_type == "arxiv_html" else AR5IV_BASE
+    return f"{domain}/html/{fp.arxiv_id}/{clean_url}"
 
 
 def _fetch(url: str, referer: str = "") -> bytes:
     """Fetch a URL, return bytes. Optionally set Referer header."""
+    import httpx
     headers = {"User-Agent": "Reaper/1.0"}
     if referer:
         headers["Referer"] = referer
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+    resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
+    resp.raise_for_status()
+    return resp.content
 
 
 def _inline_css(html: str) -> tuple[str, str]:
@@ -126,90 +135,178 @@ def _inline_css(html: str) -> tuple[str, str]:
 
 def _strip_arxiv_brand(html: str) -> str:
     """Remove arXiv-specific JS/CSS, keep TOC sidebar structure."""
-    # Remove JS scripts only (navbar/TOC stays intact)
+    # Remove ALL external scripts from arxiv CDN (they are branding, not content)
+    html = re.sub(r'<script[^>]*src="https?://[^"]*arxiv[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+    html = re.sub(r'<script[^>]*src="[^"]*\/static\/[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+    # Remove specific known scripts
     html = re.sub(r'<script[^>]*addons_new[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*feedbackOverlay[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*html2canvas[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<link[^>]*latexml_styles[^>]*>', '', html)
+    # Remove arXiv announcement banner
+    html = re.sub(r'<div\b[^>]*class="[^"]*ds-announcement[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
+    # Remove arXiv logo header
+    html = re.sub(r'<div\b[^>]*class="[^"]*html-header-logo[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
+    # Remove arXiv header navigation (Back to Abstract, Report Issue, Download PDF)
+    html = re.sub(r'<nav\b[^>]*class="[^"]*html-header-nav[^"]*"[^>]*>.*?</nav>', '', html, flags=re.DOTALL)
+    # Remove license footer and watermark
+    html = re.sub(r'<a\b[^>]*id="license-tr"[^>]*>.*?</a>', '', html, flags=re.DOTALL)
+    html = re.sub(r'<div\b[^>]*id="watermark-tr"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
     return html
 
 
-def _inline_images(html: str, arxiv_id: str = "", source_type: str = "ar5iv",
-                   page_url: str = "") -> str:
-    """Download images and embed as base64 data URIs.
+# ── Resource processing ───────────────────────────────────────────
 
-    ar5iv/arxiv_html: download from CDN, cache to data/ar5iv/{id}/
-    ar5ivist_docker: read from data/ar5ivist/{id}/
-    page_url: canonical page URL for Referer header
+def _process_resources(html: str, fp: "FetchedPage",
+                      resource_dir: str | None = None) -> str:
+    """Download external resources and embed with CDN fallback.
+
+    When resource_dir is set:
+      - Download resources, save to {resource_dir}/assets/
+      - Use local path as src, CDN URL as data-cdn onerror fallback
+      - Works offline when assets/ exists, falls back to CDN otherwise
+
+    When resource_dir is None:
+      - Just use CDN URLs (no local assets, "Light mode")
     """
-    if source_type == "ar5ivist_docker":
-        img_dir = Path(config.AR5IVIST_OUTPUT_DIR) / arxiv_id
-    else:
-        img_dir = Path(config.AR5IV_DIR) / arxiv_id
+    from ..ingestion.fetched_page import FetchedPage
+    img_dir = fp.img_dir
+    source_type = fp.source_type
 
-    url_to_b64 = {}
-    urls = [u for u in set(_IMG_PATTERN.findall(html)) if not u.startswith("data:")]  # skip already-base64
-    if not urls:
-        print(f"        no external images to embed", flush=True)
+    # Collect all unique external resource URLs
+    url_to_attrs = {}  # url -> [(full_match, attr_name, attr_value)]
+    for m in _RESOURCE_PATTERN.finditer(html):
+        tag_name = m.group(1)
+        if tag_name == 'script':
+            continue
+        url = m.group(2)
+        if not _is_downloadable_url(url):
+            continue
+        if url not in url_to_attrs:
+            url_to_attrs[url] = []
+        url_to_attrs[url].append((m.group(0), m.group(2)))
+
+    if not url_to_attrs:
         return html
-    print(f"        embedding {len(urls)} images from {source_type} ...", flush=True)
+
+    all_urls = list(url_to_attrs.keys())
+    total = len(all_urls)
+
+    # Prepare local assets directory
+    assets_dir = None
+    if resource_dir:
+        assets_dir = Path(resource_dir) / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"        processing {total} resources from {source_type} ...", flush=True)
+
+    # url -> (local_path or None, cdn_url)
+    url_to_result = {}
 
     def download_one(url):
+        cdn_url = _resolve_image_url(url, fp)
+        local_path = None
         try:
-            # Resolve local or remote path
+            raw = None
             if source_type == "ar5ivist_docker" or img_dir.exists():
                 fname = url.split("/")[-1] if "/" in url else url
                 local = img_dir / fname
                 if local.exists():
                     raw = local.read_bytes()
-                    if not _is_image_data(raw):
-                        raise ValueError(f"cached file is not an image: {fname}")
-                    ext = local.suffix.lower()
-                    mime = _BASE64_MIME.get(ext, "image/png")
-                    data = base64.b64encode(raw).decode()
-                    return url, f"data:{mime};base64,{data}"
-            full_url = _resolve_image_url(url, arxiv_id, source_type)
-            raw = _fetch(full_url, referer=page_url)
-            if not _is_image_data(raw):
-                raise ValueError(f"downloaded content is not an image: {full_url}")
-            ext = url.rsplit(".", 1)[-1].lower()
-            mime = _BASE64_MIME.get("." + ext, "image/png")
-            data = base64.b64encode(raw).decode()
-            # Cache to disk
-            img_dir.mkdir(parents=True, exist_ok=True)
-            fname = url.split("/")[-1]
-            (img_dir / fname).write_bytes(raw)
-            return url, f"data:{mime};base64,{data}"
+            if raw is None and resource_dir:
+                full_url = cdn_url
+                raw = _fetch(full_url, referer=fp.page_url)
+                if not _is_image_data(raw):
+                    raise ValueError(f"not an image: {full_url}")
+                # Cache to fp.img_dir for future runs
+                img_dir.mkdir(parents=True, exist_ok=True)
+                fname = url.split("/")[-1]
+                (img_dir / fname).write_bytes(raw)
+
+            if raw is not None and assets_dir:
+                ext = "." + url.rsplit(".", 1)[-1].lower() if "." in url else ".png"
+                fname = hashlib.md5(url.encode()).hexdigest()[:16] + ext
+                dest = assets_dir / fname
+                dest.write_bytes(raw)
+                local_path = f"assets/{fname}"
         except Exception:
-            # Inline failed — rewrite to absolute URL so the image
-            # is at least reachable when viewed with network access
-            return url, _resolve_image_url(url, arxiv_id, source_type)
+            pass  # Fallback: use CDN URL
+
+        return url, (local_path, cdn_url)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(download_one, u) for u in urls]
-        total = len(urls)
+        futures = {pool.submit(download_one, u): u for u in all_urls}
         done_count = 0
         last_pct = 0
         for f in as_completed(futures):
-            url, b64 = f.result()
-            url_to_b64[url] = b64
+            url, (local_path, cdn_url) = f.result()
+            url_to_result[url] = (local_path, cdn_url)
             done_count += 1
             pct = done_count * 100 // total
             if pct >= last_pct + 10 or done_count == total:
                 bar = "#" * (pct // 5) + "-" * ((100 - pct) // 5)
-                embedded_so_far = sum(1 for v in url_to_b64.values() if v.startswith("data:"))
-                print(f"        embed [{bar}] {done_count}/{total} ({embedded_so_far} inlined)", flush=True)
+                saved = sum(1 for v in url_to_result.values() if v[0] is not None)
+                print(f"        embed [{bar}] {done_count}/{total} ({saved} saved)", flush=True)
                 last_pct = pct - (pct % 10)
 
-    embedded = sum(1 for v in url_to_b64.values() if v.startswith("data:"))
-    print(f"        done: {embedded}/{len(urls)} embedded", flush=True)
+    saved = sum(1 for v in url_to_result.values() if v[0] is not None)
+    print(f"        done: {saved}/{total} saved locally, rest use CDN", flush=True)
 
+    # Replace tags: add local src + data-cdn fallback
     def replacer(m):
-        src = m.group(1)
-        new_src = url_to_b64.get(src, src)
-        return m.group(0).replace(f'src="{src}"', f'src="{new_src}"')
+        tag = m.group(0)
+        attr_value = m.group(2)
+        result = url_to_result.get(attr_value)
+        if result is None:
+            return tag
+        local_path, cdn_url = result
 
-    return _IMG_PATTERN.sub(replacer, html)
+        if local_path:
+            # Add local src + data-cdn (onerror removed — Zotero browser crashes)
+            tag = tag.replace(f'="{attr_value}"', f'="{local_path}"', 1)
+            tag = tag.rstrip(' >')
+            tag += f' data-cdn="{cdn_url}"'
+            if not tag.endswith('>'):
+                tag += '>'
+        else:
+            # No local asset, use CDN URL directly
+            tag = tag.replace(f'="{attr_value}"', f'="{cdn_url}"', 1)
+        return tag
+
+    html = _RESOURCE_PATTERN.sub(replacer, html)
+    return html
+
+
+_SOURCE_TOGGLE_JS = """
+<script id="reaper-source-toggle">
+(function(){
+  var mode = localStorage.getItem('reaper_source') || 'auto';
+  function applyMode(m) {
+    mode = m;
+    localStorage.setItem('reaper_source', m);
+    document.querySelectorAll('[data-cdn]').forEach(function(el) {
+      var localSrc = el.getAttribute('src');
+      var cdnSrc = el.getAttribute('data-cdn');
+      if (m === 'cdn' && localSrc && cdnSrc && !localSrc.startsWith('http')) {
+        el.setAttribute('src', cdnSrc);
+      } else if (m === 'local' && cdnSrc && localSrc && localSrc.startsWith('http')) {
+        el.setAttribute('src', localSrc);
+      }
+    });
+    var btn = document.getElementById('reaper-source-btn');
+    if (btn) {
+      btn.textContent = m === 'cdn' ? '\u25C9' : '\u25CE';
+      btn.title = m === 'cdn' ? 'Switch to local assets' : 'Switch to CDN';
+      btn.classList.toggle('active', m === 'local');
+    }
+  }
+  applyMode(mode);
+  window.toggleReaperSource = function() {
+    applyMode(mode === 'cdn' ? 'local' : 'cdn');
+  };
+})();
+</script>
+"""
 
 
 def replace_footer(html: str, arxiv_id: str, source_type: str = "ar5iv") -> str:
@@ -324,18 +421,23 @@ def _inject_translation(html: str, block_index: int, zh_text: str, inline: bool 
 def render_bilingual_html(
     marked_html: str,
     blocks_with_zh: list[dict],
+    fp: "FetchedPage",
     term_dict: dict[str, str] | None = None,
-    arxiv_id: str = "",
+    resource_dir: str | None = None,
     embed_images: bool = True,
-    source_type: str = "ar5iv",
 ) -> str:
     """Generate bilingual HTML.
 
-    embed_images=True:  base64 inline images (offline, ~10MB)
-    embed_images=False: images load from CDN (needs network, ~2MB)
-    source_type: "ar5iv"|"arxiv_html"|"ar5ivist_docker"|"cache"
+    resource_dir:  if set, save resources to {resource_dir}/assets/ and use
+                   relative paths with CDN fallback (Zotero-compatible).
+                   If None, use CDN URLs only ("Light mode").
+    embed_images:  deprecated, kept for backward compatibility.
+    fp: FetchedPage with source_type, arxiv_id, img_dir, page_url
     """
+    from ..ingestion.fetched_page import FetchedPage
     html = marked_html
+    source_type = fp.source_type
+    arxiv_id = fp.arxiv_id
     is_arxiv = (source_type == "arxiv_html" or
                 ("ltx_page_navbar" in marked_html))
 
@@ -358,20 +460,8 @@ def render_bilingual_html(
     # 2. Embed ar5iv CSS inline
     html, core_css = _inline_css(html)
 
-    # 3. Images: embed or fix paths to absolute
-    page_url = _extract_page_url(marked_html, arxiv_id, source_type)
-    if embed_images:
-        html = _inline_images(html, arxiv_id, source_type, page_url=page_url)
-    else:
-        # Light mode: rewrite ALL relative image paths to absolute CDN URLs
-        # Use the same URL resolution logic as Full mode's fallback
-        def _fix_img_src(m):
-            src = m.group(1)
-            if src.startswith("data:") or src.startswith("http"):
-                return m.group(0)
-            new_src = _resolve_image_url(src, arxiv_id, source_type)
-            return m.group(0).replace(f'src="{src}"', f'src="{new_src}"')
-        html = _IMG_PATTERN.sub(_fix_img_src, html)
+    # 3. External resources: download + embed with CDN fallback
+    html = _process_resources(html, fp, resource_dir=resource_dir)
 
     # 3. Build TOC from blocks (ar5iv/ar5ivist: generate; arxiv_html: already in HTML)
     toc_entries = [(i, b) for i, b in enumerate(blocks_with_zh)
@@ -385,6 +475,7 @@ def render_bilingual_html(
     # 5. Inject TOC CSS/JS + translation colors
     toc_css = (UI_DIR / "toc-sidebar.css").read_text(encoding="utf-8")
     toc_js = (UI_DIR / "toc-toggle.js").read_text(encoding="utf-8")
+    
     if is_arxiv or toc_entries:
         # TOC sidebar present — inject sidebar CSS/JS
         override_css = (
@@ -422,6 +513,9 @@ def render_bilingual_html(
     html = html.replace("</head>",
         f'<script id="reaper-data" type="reaper/metadata">{data_json}</script>\n</head>', 1)
 
+    # 7. Inject source toggle JS (before </body>)
+    html = html.replace('</body>', f'{_SOURCE_TOGGLE_JS}\n</body>', 1)
+
     return html
 
 
@@ -430,3 +524,15 @@ def save_html(html: str, output_path: str) -> str:
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     return output_path
+
+
+def zotero_compatible_html(html: str) -> str:
+    """Convert <object> tags to <img> for Zotero internal browser compatibility.
+
+    Zotero's embedded browser does not render <object> tags with data URIs.
+    Call this before saving to the Zotero output directory.
+    """
+    html = re.sub(r'<object\b', '<img', html)
+    html = re.sub(r' type="[^"]*"', '', html)
+    html = html.replace(' data="', ' src="')
+    return html

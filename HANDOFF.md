@@ -1,0 +1,222 @@
+# Reaper — 项目交接文档
+
+## 概述
+
+Reaper 将 arxiv 论文自动转换为中英对照 HTML，存入 Zotero 作为附件。支持三种 HTML 来源（ar5iv、arxiv.org/html、ar5ivist Docker），每篇论文渲染为带可折叠目录侧边栏的独立 HTML 文件。
+
+## 仓库结构
+
+```
+reaper/
+├── config.json                    # 用户配置（gitignore，含 API key）
+├── config.json.example            # 配置模板（无密钥）
+├── main.py                        # CLI 入口
+├── src/
+│   ├── cli.py                     # 命令行工具
+│   ├── config.py                  # 配置读取
+│   ├── server.py                  # HTTP 后端服务
+│   ├── task.py                    # 任务状态管理（断点续传）
+│   ├── ingestion/
+│   │   ├── fetcher.py             # 多来源 HTML 获取
+│   │   └── parser.py              # HTML 解析（Block 提取）
+│   ├── translation/
+│   │   ├── translator.py          # LLM 翻译引擎（按章节+并发）
+│   │   ├── dictionary.py          # 双层术语表（用户+LLM自动）
+│   │   └── cache.py               # SHA256 翻译缓存
+│   └── rendering/
+│       ├── renderer.py            # 主渲染逻辑（注入TOC/译文/页脚）
+│       └── ui/
+│           ├── toc-sidebar.css    # TOC侧边栏+工具栏样式
+│           └── toc-toggle.js      # 工具栏交互（TOC+主题切换）
+├── zotero-plugin/
+│   ├── bootstrap.js               # 插件入口
+│   ├── manifest.json              # 插件元数据
+│   ├── prefs.js                   # 默认偏好
+│   ├── setup.sh                   # 构建安装脚本
+│   └── content/preferences.xhtml  # 设置页面
+├── tests/
+│   ├── run_tests.py               # 自动化测试套件
+│   └── gen_3sources.py            # 三来源对比生成脚本
+├── data/                          # 运行时产物（gitignore）
+│   ├── css/                       # ar5iv CSS 缓存（自动下载）
+│   ├── ar5iv/                     # ar5iv HTML 缓存
+│   ├── ar5ivist/                  # ar5ivist Docker 产物
+│   ├── arxiv_source/              # LaTeX 源码
+│   ├── zotero/                    # 最终双语 HTML
+│   ├── translation_cache/         # 翻译缓存
+│   ├── tasks/                     # 任务状态
+│   └── logs/                      # 运行日志
+└── ARCHITECTURE.md                # 旧架构文档（部分过时）
+```
+
+## 核心架构
+
+### 数据流
+
+```
+用户请求 (arxiv_id)
+    │
+    ▼
+fetch_html() → 尝试三种来源（按 config.sources 优先级）
+    │
+    ├── ar5iv: https://ar5iv.labs.arxiv.org/html/{id}
+    ├── arxiv_html: https://arxiv.org/html/{id}
+    └── ar5ivist_docker: 下载源码 → Docker 编译
+    │
+    ▼
+parser.mark_and_extract(raw_html) → marked_html + blocks[]
+    │
+    ├── blocks[i].type  = "title" | "section" | "para" | "figcaption"
+    ├── blocks[i].level = 0 (h1) | 1 (h2) | 2 (h3) | 3 (h4)
+    ├── blocks[i].text  = 提取的纯文本（数学→MATH_N，脚注→FN_N）
+    └── blocks[i].math_map = {MATH_0: "<math>...</math>", ...}
+    │
+    ▼
+translate_blocks(blocks) → blocks_with_zh[]
+    │
+    ├── 按章节分组，并发翻译
+    ├── 翻译缓存：SHA256(en) → zh
+    └── 术语词典：用户定义 > LLM 自动提取
+    │
+    ▼
+render_bilingual_html(marked_html, blocks_with_zh) → 最终 HTML
+    │
+    ├── _inject_blocks_toc()     → 生成嵌套 TOC 导航栏 + 锚点
+    ├── _inline_css()            → 内嵌 ar5iv CSS
+    ├── replace_footer()         → 来源特定页脚
+    ├── 注入 toc-sidebar.css     → 侧边栏/工具栏样式
+    ├── 注入 toc-toggle.js       → 工具栏交互
+    └── 注入中文译文
+```
+
+### 三种来源的对齐
+
+三种来源（ar5iv、arxiv_html、ar5ivist_docker）都产自 LaTeXML 引擎，HTML 结构使用相同的 `ltx_*` 类体系。渲染器对三种来源应用相同的处理流程：
+
+- **ar5iv / ar5ivist_docker**：从 parser 的 blocks 数据生成 TOC（`_inject_blocks_toc`）
+- **arxiv_html**：保留原始 HTML 中的 `<nav class="ltx_TOC">`，只转换链接为文档内锚点
+
+最终所有来源都包裹在 `<div class="reaper-content">` 画布中，统一应用工具栏和侧边栏样式。
+
+## 输出 HTML 结构
+
+```html
+<body>                                    <!-- 默认无 toc-open class -->
+  <div class="reaper-toolbar">            <!-- JS 动态创建，始终可见 -->
+    <button class="reaper-toc-btn">☰</button>
+    <button>☾</button>
+  </div>
+
+  <nav class="ltx_page_navbar">           <!-- 侧边栏（默认隐藏 left:-100vw）-->
+    <nav class="ltx_TOC">
+      <ol class="ltx_toclist">            <!-- 嵌套层级 -->
+        <li class="ltx_tocentry_section">
+          <span class="reaper-toc-toggle-icon">▼</span>  <!-- 折叠箭头 -->
+          <a href="#reaper-sec-3">1 Introduction</a>
+          <ol class="ltx_toclist">         <!-- 子层级 -->
+            <li class="ltx_tocentry_subsection">...</li>
+          </ol>
+        </li>
+      </ol>
+    </nav>
+  </nav>
+
+  <div class="reaper-content">            <!-- 画布 -->
+    <div class="ltx_page_main">...</div>   <!-- 原始 ar5iv 正文 -->
+  </div>
+</body>
+```
+
+## 关键设计决策
+
+### 1. TOC 层级检测
+Parser 的 `_TAG_PATTERN` 正则匹配 `ltx_title_section`、`ltx_title_subsection`、`ltx_title_subsubsection`。注意：`subsection` 包含 `section` 子串，所以判断顺序必须从长到短（先 subsubsection → subsection → section）。
+
+### 2. 锚点生成
+ar5iv/ar5ivist 的 section 标题没有 `id` 属性。`_inject_blocks_toc` 在生成 TOC 时为每个标题添加 `id="reaper-sec-{N}"`（N 为 block 索引），TOC 链接指向 `#reaper-sec-{N}`。
+
+### 3. 画布包裹
+所有来源的正文都包裹在 `<div class="reaper-content">` 中。这样我们完全控制内容布局，不跟 ar5iv CSS 冲突。非 arxiv_html 来源在 `_inject_blocks_toc` 中包裹，arxiv_html 在 `render_bilingual_html` 的主流程中包裹。
+
+### 4. 工具栏
+工具栏由 `toc-toggle.js` 动态创建，位于 `position:fixed; top:0`。包含 TOC 切换按钮（☰）和主题切换按钮（☾）。主题切换设置 `data-theme="dark"` 属性，ar5iv CSS 通过 CSS 变量响应。
+
+### 5. 页脚
+`replace_footer()` 根据 `source_type` 生成不同的来源标注：
+- ar5iv: `arxiv:{id} · HTML from ar5iv · Modified by Reaper`
+- arxiv_html: `arxiv:{id} · HTML from arxiv.org · Modified by Reaper`
+- ar5ivist_docker: `arxiv:{id} · generated by ar5ivist · Modified by Reaper`
+
+### 6. 翻译缓存
+`TranslationCache.put()` 每次翻译完成后立即写入磁盘（线程安全，带锁）。Task 状态每次变更也立即写入。无需外部 `save()` 调用。
+
+### 7. Docker 超时
+ar5ivist Docker 转换没有超时限制——复杂论文可能需要数小时。只显示周期性状态更新。Docker 输出写入 `data/ar5ivist/{id}/ar5ivist.log`。
+
+## 踩过的坑
+
+### 1. 沙箱路径问题
+`ctx_execute`（pi 的代码执行工具）写入文件时使用沙箱临时目录，不是项目目录。必须使用绝对路径 `/Users/crack/Crack/pi-extension/reaper/...` 才能写入正确位置。
+
+### 2. CSS 变量 vs 硬编码颜色
+工具栏和侧边栏必须使用 ar5iv 的 CSS 变量（`var(--background-color)`、`var(--text-color)`）而不是硬编码颜色，否则主题切换无效。
+
+### 3. `<base>` 标签干扰锚点
+arxiv.org HTML 的 `<base>` 标签会干扰文档内锚点跳转，必须删除。
+
+### 4. `subsection` 包含 `section` 子串
+正则匹配时 `ltx_title_subsection` 包含 `ltx_title_section` 子串，判断顺序必须从长到短。
+
+### 5. 不要用 `file://` 协议测试
+Chrome 的 `file://` 安全策略阻止 JS 执行和外部资源加载。测试时通过 HTTP（`python3 -m http.server` 或 Reaper 的 `/papers/` 端点）。
+
+### 6. 不要硬编码 section 标题
+曾经尝试用正则匹配 "Introduction"、"Summary" 等关键词来识别伪标题，这是错误的。应该检测 HTML 结构（`<h3 class="ltx_title_subsection">`）。
+
+### 7. 不要 squash 提交
+每次修改正常 `git commit`，不要用 `git reset --soft` 覆盖历史。
+
+## 用户多次强调的要点
+
+1. **正文放在画布中**：`reaper-content` 包裹所有正文，工具栏/TOC 在画布外
+2. **TOC 默认关闭**：打开网页时侧边栏隐藏，点 ☰ 展开
+3. **不要硬编码 section 标题**：用 HTML 结构（h2/h3/h4）识别层级
+4. **不要自己写 CSS 框架**：优先使用 ar5iv 原生 CSS 变量
+5. **每次修改正常 commit**：不要 squash，保留历史
+6. **测试时用 HTTP 而非 file://**
+7. **生成 HTML 时跳过翻译**：用 fake blocks（`zh: ''`）快速测试布局
+8. **三个来源统一输出样式**：所有来源都应用相同的 TOC 和工具栏
+
+## 测试
+
+```bash
+# 快速渲染（不下载，不翻译）
+cd /Users/crack/Crack/pi-extension/reaper
+python3 -c "
+import sys, os; sys.path.insert(0,'.')
+from src.ingestion.parser import mark_and_extract
+from src.rendering.renderer import render_bilingual_html
+for d in os.listdir('data/ar5iv'):
+    p = f'data/ar5iv/{d}/{d}.html'
+    if not os.path.exists(p): continue
+    raw = open(p).read(); m,b = mark_and_extract(raw)
+    f = [{'zh':'','en':x.text,'type':x.type,'level':x.level,'math_map':x.math_map} for x in b]
+    h = render_bilingual_html(m,f,arxiv_id=d,embed_images=False,source_type='ar5iv')
+    open(f'data/zotero/{d}.html','w').write(h)
+    print(f'{d}: {len(h):,}B')
+"
+
+# 三来源对比
+python3 tests/gen_3sources.py 2307.14989
+
+# 完整测试套件（需要先下载论文）
+python3 tests/run_tests.py
+```
+
+## 未来计划
+
+- 统一浏览器预览和 Zotero 附件的 UI（目前两套独立）
+- 术语面板功能恢复（在浏览器预览中，原有 `reaper.js` 中有术语面板逻辑）
+- 可折叠目录默认展开所有层级（目前 L3 默认折叠）
+- 窄屏模式优化（目前简单隐藏）
+- 翻译质量改进

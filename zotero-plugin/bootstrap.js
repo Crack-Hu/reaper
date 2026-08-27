@@ -9,10 +9,9 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
   function log(msg) { Zotero.debug("Reaper: " + msg); }
   function pref(key, fallback) { try { var v = Zotero.Prefs.get(PREFS + key); return (v != null) ? v : fallback; } catch (e) { return fallback; } }
   function serverURL() { return "http://localhost:" + pref("serverPort", "16625"); }
-  function buildTitle(arxivID, source, light) {
+  function buildTitle(arxivID, source) {
     var name = pref("attachmentName", "Reaper: {arxiv_id}").replace("{arxiv_id}", arxivID);
     if (source) name += "_" + source;
-    if (light) name += "_light";
     return name;
   }
 
@@ -60,9 +59,6 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
           { menuType: "menuitem",
             onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "Generate Bilingual HTML"); ctx.setVisible(true); },
             onCommand: generateBilingualAction },
-          { menuType: "menuitem",
-            onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "Generate Bilingual HTML (Light)"); ctx.setVisible(true); },
-            onCommand: generateBilingualLightAction },
           { menuType: "submenu", id: "reaper-source-submenu",
             onShowing: function(_e, ctx) {
               ctx.menuElem.setAttribute("label", "Generate from Source");
@@ -70,25 +66,19 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
             },
             menus: [
               { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "arxiv (Full)"); ctx.setVisible(true); },
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "arxiv.org"); ctx.setVisible(true); },
                 onCommand: function() { generateFromSourceAction("arxiv_html"); } },
               { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "arxiv (Light)"); ctx.setVisible(true); },
-                onCommand: function() { generateFromSourceAction("arxiv_html", true); } },
-              { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5iv (Full)"); ctx.setVisible(true); },
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5iv"); ctx.setVisible(true); },
                 onCommand: function() { generateFromSourceAction("ar5iv"); } },
               { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5iv (Light)"); ctx.setVisible(true); },
-                onCommand: function() { generateFromSourceAction("ar5iv", true); } },
-              { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5ivist (Full)"); ctx.setVisible(true); },
+                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5ivist"); ctx.setVisible(true); },
                 onCommand: function() { generateFromSourceAction("ar5ivist_docker"); } },
-              { menuType: "menuitem",
-                onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "ar5ivist (Light)"); ctx.setVisible(true); },
-                onCommand: function() { generateFromSourceAction("ar5ivist_docker", true); } },
             ],
           },
+          { menuType: "menuitem",
+            onShowing: function(_e, ctx) { ctx.menuElem.setAttribute("label", "Complete Resources"); ctx.setVisible(true); },
+            onCommand: completeResourcesAction },
         ],
       }],
     });
@@ -151,19 +141,19 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     }
   }
 
-  async function generateBilingualLightAction() {
+  async function generateFromSourceAction(source) {
     var zp = Zotero.getActiveZoteroPane(), items;
     if (!zp || !(items = zp.getSelectedItems())) return;
     for (var i = 0; i < items.length; i++) {
-      try { await processItem(items[i], true); } catch (e) { log("err: " + e); }
+      try { await processItem(items[i], source); } catch (e) { log("err: " + e); }
     }
   }
 
-  async function generateFromSourceAction(source, light) {
+  async function completeResourcesAction() {
     var zp = Zotero.getActiveZoteroPane(), items;
     if (!zp || !(items = zp.getSelectedItems())) return;
     for (var i = 0; i < items.length; i++) {
-      try { await processItem(items[i], light, source); } catch (e) { log("err: " + e); }
+      try { await completeResources(items[i]); } catch (e) { log("err: " + e); }
     }
   }
 
@@ -228,7 +218,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     }
   }
 
-  async function processItem(item, light, source) {
+  async function processItem(item, source) {
     if (!item.isRegularItem()) { log("processItem: not a regular item"); return; }
     var arxivID = extractArxivIDFromItem(item);
 
@@ -241,7 +231,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       if (!arxivID) { flash("Reaper", "Could not extract arxiv ID from input."); return; }
     }
 
-    var title = buildTitle(arxivID, source, light);
+    var title = buildTitle(arxivID, source);
 
     // Check if already has a Reaper attachment
     var atts = item.getAttachments();
@@ -277,7 +267,6 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     try { pw = new Zotero.ProgressWindow(); pw.changeHeadline("Reaper"); pw.addDescription("Translating " + arxivID + " ..."); pw.show(); } catch (e) {}
 
     var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
-    if (light) fetchURL += "&embed_images=0";
     if (source) fetchURL += "&source=" + source;
 
     var html;
@@ -297,21 +286,56 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       return;
     }
 
-    // Save attachment — write to temp file, then import into Zotero storage
+    // Save attachment — import HTML file, then copy assets from server's output dir
     flash("Reaper", "Saving " + title + " ...");
 
     try {
-      var tmpDir = Zotero.getTempDirectory().path;
-      var tmpFile = tmpDir + arxivID + "_reaper.html";
-      await Zotero.File.putContentsAsync(tmpFile, html);
+      var outputDir = resp.headers.get("X-Output-Dir");
+      if (outputDir) {
+        // Import the HTML file from the server's output directory
+        var htmlFile = outputDir + "/index.html";
+        var att = await Zotero.Attachments.importFromFile({
+          file: htmlFile,
+          parentItemID: item.id,
+          title: title,
+          contentType: "text/html",
+        });
+        log("imported attachment id: " + (att ? att.id : "null"));
 
-      var att = await Zotero.Attachments.importFromFile({
-        file: tmpFile,
-        parentItemID: item.id,
-        title: title,
-        contentType: "text/html",
-      });
-      log("imported attachment id: " + (att ? att.id : "null"));
+        // Copy assets from server's output directory to Zotero storage
+        if (att) {
+          var storagePath = att.getFilePath();
+          if (storagePath) {
+            var storageDir = storagePath.substring(0, storagePath.lastIndexOf("/"));
+            log("storage path: " + storageDir);
+            // Read assets from the server's output directory and write to storage
+            var srcAssets = outputDir + "/assets";
+            try {
+              // Copy assets using IOUtils.copy (preserves binary data correctly)
+              var children = await IOUtils.getChildren(srcAssets);
+              var count = 0;
+              Zotero.File.createDirectoryIfMissing(storageDir + "/assets");
+              for (var i = 0; i < children.length; i++) {
+                var name = children[i].split("/").pop();
+                await IOUtils.copy(children[i], storageDir + "/assets/" + name);
+                count++;
+              }
+              log("copied " + count + " assets");
+            } catch (e) { log("copy assets err: " + e); }
+          }
+        }
+      } else {
+        // Light mode: single HTML file with CDN URLs
+        var tmpFile = Zotero.getTempDirectory().path + arxivID + "_reaper.html";
+        await Zotero.File.putContentsAsync(tmpFile, html);
+        var att = await Zotero.Attachments.importFromFile({
+          file: tmpFile,
+          parentItemID: item.id,
+          title: title,
+          contentType: "text/html",
+        });
+        log("imported attachment id: " + (att ? att.id : "null"));
+      }
     } catch (e) {
       log("save err: " + e);
       flash("Reaper", "Failed to save: " + e);
@@ -321,6 +345,74 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
     flash("Reaper", "Saved: " + title);
     log("Saved: " + title);
   }
+
+  async function completeResources(item) {
+    if (!item.isRegularItem()) { log("completeResources: not a regular item"); return; }
+    var arxivID = extractArxivIDFromItem(item);
+    if (!arxivID) { flash("Reaper", "No arxiv ID found for this item."); return; }
+
+    // Find existing Reaper attachment
+    var title = buildTitle(arxivID);
+    var atts = item.getAttachments();
+    var existingAtt = null;
+    for (var i = 0; i < atts.length; i++) {
+      var att = Zotero.Items.get(atts[i]);
+      if (att && att.getField("title") === title) {
+        existingAtt = att;
+        break;
+      }
+    }
+
+    if (!existingAtt) {
+      flash("Reaper", "No Reaper attachment found. Generate first.");
+      return;
+    }
+
+    flash("Reaper", "Downloading resources for " + arxivID + " ...");
+
+    try {
+      // Regenerate from server (same as Generate)
+      var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
+      var resp = await fetch(fetchURL);
+      if (!resp.ok) throw new Error("Server returned " + resp.status);
+      var html = await resp.text();
+
+      // Remove old attachment
+      if (existingAtt) {
+        await existingAtt.erase();
+      }
+
+      // Import server's output directory directly
+      var outputDir = resp.headers.get("X-Output-Dir");
+      if (outputDir) {
+        log("importing directory: " + outputDir);
+        var att = await Zotero.Attachments.importFromFile({
+          file: outputDir,
+          parentItemID: item.id,
+          title: title,
+          contentType: "text/html",
+        });
+        log("imported attachment id: " + (att ? att.id : "null"));
+      } else {
+        var tmpFile = Zotero.getTempDirectory().path + arxivID + "_reaper.html";
+        await Zotero.File.putContentsAsync(tmpFile, html);
+        var att = await Zotero.Attachments.importFromFile({
+          file: tmpFile,
+          parentItemID: item.id,
+          title: title,
+          contentType: "text/html",
+        });
+        log("imported attachment id: " + (att ? att.id : "null"));
+      }
+
+      flash("Reaper", "Resources completed for " + arxivID);
+    } catch (e) {
+      log("completeResources FAIL: " + e);
+      flash("Reaper", "Failed to complete resources: " + e);
+    }
+  }
+
+  // ──── shared helpers ───────────────
 
   // ──── utils ────────────────────────
 

@@ -2,5 +2,5 @@
 
 from .ingestion import fetch_html, arxiv_id_from_url, mark_and_extract, parse_blocks, Block, restore_math_in_translation
 from .translation import translate_text, translate_blocks, TermDictionary
-from .rendering import render_bilingual_html, save_html
+from .rendering import render_bilingual_html, save_html, zotero_compatible_html
 from . import config

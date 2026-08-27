@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import config
 
-ROOT = Path(__file__).parent.parent
 PAPERS_DIR = Path(config.ZOTERO_DIR)
 AR5IV_DIR = Path(config.AR5IV_DIR)
 LOG_PATH = Path(config.LOG_DIR) / "server.log"
@@ -69,8 +68,13 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         # /papers/<paper_id>
         if parsed.path.startswith("/papers/"):
             paper_id = parsed.path.split("/papers/")[1].strip("/")
-            # Find matching file
+            # Find matching file (old single-file or new directory format)
             matches = list(PAPERS_DIR.glob(f"{paper_id}*.html"))
+            if not matches:
+                # Check new directory format: {paper_id}/index.html
+                dir_path = PAPERS_DIR / paper_id / "index.html"
+                if dir_path.exists():
+                    matches = [dir_path]
             if matches:
                 html = matches[0].read_text(encoding="utf-8")
                 self._respond_html(html)
@@ -104,10 +108,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             # Clear caches (excluding dictionary)
             import os as _os, glob as _glob, shutil as _shutil
             paths = [
-                config.AR5IV_DIR + "/" + arxiv_id,  # directory now
-                config.CACHE_DIR + "/" + arxiv_id + ".json",
-                _os.path.join(config.DATA_DIR, "tasks", arxiv_id + ".json"),
-                config.ZOTERO_DIR + "/" + arxiv_id + ".html",
+                config.AR5IV_DIR + "/" + arxiv_id,  # ar5iv HTML cache
+                config.CACHE_DIR + "/" + arxiv_id + ".json",  # translation cache
+                _os.path.join(config.DATA_DIR, "tasks", arxiv_id + ".json"),  # task state
+                config.ZOTERO_DIR + "/" + arxiv_id + ".html",  # old single-file format
+                config.ZOTERO_DIR + "/" + arxiv_id,  # directory format (with or without _source)
+                config.ZOTERO_DIR + "/" + arxiv_id + "_files",  # legacy _files dir
             ]
             cleared = []
             for p in paths:
@@ -131,20 +137,38 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 self._respond_json({"error": "missing arxiv_id"}, 400)
                 return
 
-            # Generate complete HTML first, then send
+            # Generate complete HTML, save to directory, return path
             try:
-                html = self._generate_paper(arxiv_id, embed_images=embed, force_source=source)
-                # Save with source-aware filename
-                from src.rendering.renderer import save_html
-                import os as _os
-                suffix = ""
+                from src.rendering.renderer import save_html, zotero_compatible_html
+                import os as _os, shutil as _shutil
+                # Output directory: data/zotero/{arxiv_id}[_{source}]/
+                out_dir = _os.path.join(config.ZOTERO_DIR, arxiv_id)
                 if source:
-                    suffix += f"_{source}"
-                if not embed:
-                    suffix += "_light"
-                out_path = _os.path.join(config.ZOTERO_DIR, f"{arxiv_id}{suffix}.html")
-                save_html(html, out_path)
-                self._respond_html(html)
+                    out_dir += f"_{source}"
+                
+                # Use out_dir as resource_dir directly — saves assets to out_dir/assets/
+                resource_dir = out_dir if embed else None
+                html = self._generate_paper(arxiv_id, embed_images=embed, force_source=source,
+                                            resource_dir=resource_dir)
+                html = zotero_compatible_html(html)
+                
+                if embed and resource_dir:
+                    # Save HTML alongside assets: out_dir/index.html + out_dir/assets/
+                    _os.makedirs(out_dir, exist_ok=True)
+                    save_html(html, _os.path.join(out_dir, "index.html"))
+                else:
+                    # Light mode: single file
+                    _os.makedirs(_os.path.dirname(out_dir + ".html"), exist_ok=True)
+                    save_html(html, out_dir + ".html")
+                
+                # Respond with HTML + output path header
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                if embed and resource_dir:
+                    self.send_header("X-Output-Dir", _os.path.abspath(out_dir))
+                self.send_header("Content-Length", str(len(html.encode("utf-8"))))
+                self.end_headers()
+                self.wfile.write(html.encode("utf-8"))
             except Exception as e:
                 # Save error to task for diagnostics
                 from src.task import Task
@@ -221,13 +245,16 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
         self._respond_json({"error": "not found"}, 404)
 
-    def _generate_paper(self, arxiv_id: str, embed_images: bool = True, force_source: str | None = None) -> str:
+    def _generate_paper(self, arxiv_id: str, embed_images: bool = True,
+                       force_source: str | None = None,
+                       resource_dir: str | None = None) -> str:
         """Run the full pipeline with state tracking.
 
         Args:
             arxiv_id: paper ID
-            embed_images: True = base64 inline, False = CDN URLs
+            embed_images: True = download assets + CDN fallback, False = CDN only
             force_source: override default source order (e.g. "ar5iv", "arxiv_html")
+            resource_dir: if set, save assets to {resource_dir}/assets/
         """
         from src.ingestion.fetcher import fetch_html
         from src.ingestion.parser import mark_and_extract
@@ -246,16 +273,16 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         # Step 1: Fetch
         print(f"  {tag} [1/4] Fetching HTML ...", flush=True)
         task.set_fetching()
-        arxiv_id, src_type, raw_html = fetch_html(arxiv_id, cache_dir=str(config.AR5IV_DIR),
-                                                         force_source=force_source)
+        fp = fetch_html(arxiv_id, cache_dir=str(config.AR5IV_DIR), force_source=force_source)
+        raw_html = fp.html
         print(f"  {tag}        {len(raw_html):,} bytes", flush=True)
 
         # Load unified paper cache
         paper_cache = PaperCache.load(arxiv_id)
         term_dict = TermDictionary()
 
-        # Check if HTML hash matches → skip parse + translate entirely
-        if paper_cache.match(raw_html):
+        # Check if HTML hash matches and cache has translations → skip parse + translate
+        if paper_cache.match(raw_html) and paper_cache.translated_count > 0:
             print(f"  {tag} [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
             task.set_parsing()
             task.set_translating()
@@ -280,8 +307,9 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             print(f"  {tag}        {len(blocks)} blocks extracted", flush=True)
 
             # Update cache with new HTML hash + blocks (merges old translations by hash)
-            paper_cache.update(raw_html, src_type, blocks)
-            paper_cache.save()
+            # NOTE: Do NOT save() here — only save after merge_translations() so that
+            # a crash during translation does not persist a cache with 0 translations.
+            paper_cache.update(raw_html, fp.source_type, blocks)
             matched = sum(1 for b in paper_cache.blocks if b.get("zh"))
             if matched:
                 print(f"  {tag}        {matched}/{len(blocks)} blocks matched from previous cache", flush=True)
@@ -315,7 +343,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     if i < len(task.blocks) and not task.blocks[i]["done"]:
                         task.mark_done(i)
 
-            # Merge translations back into cache
+            # Merge translations back into cache and save to disk
             paper_cache.merge_translations(translated)
             paper_cache.save()
 
@@ -328,13 +356,15 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         result = render_bilingual_html(
             marked_html=marked_html,
             blocks_with_zh=translated,
+            fp=fp,
             term_dict=term_dict.all_terms,
-            arxiv_id=arxiv_id,
             embed_images=embed_images,
-            source_type=src_type,
+            resource_dir=resource_dir,
         )
         print(f"  {tag}        {len(result):,} bytes", flush=True)
 
+        # Clear interrupted flag (we successfully completed this run)
+        task.interrupted = False
         task.set_done()
         _active_tasks.pop(arxiv_id, None)
         print(f"  {tag} ✅ Done", flush=True)
@@ -374,26 +404,12 @@ def get_translation_pool():
         print(f"  Translation pool: {config.TRANSLATION_CONCURRENCY} workers", flush=True)
     return _translation_pool
 
-UI_DIR = ROOT / "src" / "rendering" / "ui"
-_UI_CSS = ""
-_UI_JS = ""
-
-
-def load_ui():
-    global _UI_CSS, _UI_JS
-    _UI_CSS = (UI_DIR / "toc-sidebar.css").read_text(encoding="utf-8")
-    _UI_JS = (UI_DIR / "toc-toggle.js").read_text(encoding="utf-8")
-
-
 def main():
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
     AR5IV_DIR.mkdir(parents=True, exist_ok=True)
-    load_ui()
     print(f"Reaper Backend")
     print(f"  ar5iv cache: {AR5IV_DIR}")
     print(f"  Zotero output: {PAPERS_DIR}")
-    print(f"  UI CSS: {len(_UI_CSS)} bytes")
-    print(f"  UI JS:  {len(_UI_JS)} bytes")
     print(f"\n  → http://localhost:{config.SERVER_PORT}")
     print(f"  ar5iv dir: {AR5IV_DIR}")
     print(f"  zotero dir: {PAPERS_DIR}\n")

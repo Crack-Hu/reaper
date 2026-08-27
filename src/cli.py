@@ -11,7 +11,7 @@ from . import (
     translate_blocks,
     TermDictionary,
     render_bilingual_html,
-    save_html,
+    save_html, zotero_compatible_html,
     config,
 )
 
@@ -35,8 +35,10 @@ def main():
     # Step 1: Fetch
     print(f"[1/4] 获取 ar5iv HTML ...")
     try:
-        arxiv_id, ar5iv_html = fetch_html(args.input)
-        print(f"  ✓ 文章 ID: {arxiv_id}, HTML 大小: {len(ar5iv_html):,} bytes")
+        fp = fetch_html(args.input)
+        arxiv_id = fp.arxiv_id
+        ar5iv_html = fp.html
+        print(f"  ✓ 文章 ID: {arxiv_id}, 来源: {fp.source_type}, HTML 大小: {len(ar5iv_html):,} bytes")
     except Exception as e:
         print(f"  ✗ 获取失败: {e}")
         sys.exit(1)
@@ -89,10 +91,10 @@ def main():
     html_output = render_bilingual_html(
         marked_html=marked_html,
         blocks_with_zh=translated,
+        fp=fp,
         term_dict=term_dict.all_terms,
-        arxiv_id=arxiv_id,
     )
-    saved = save_html(html_output, output_path)
+    saved = save_html(zotero_compatible_html(html_output), output_path)
     print(f"  ✓ 已保存: {saved}")
     print(f"\n🎉 完成! 用浏览器打开: file://{os.path.abspath(saved)}")
 
