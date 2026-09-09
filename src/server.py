@@ -65,16 +65,16 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
 
-        # /papers/<paper_id>
-        if parsed.path.startswith("/papers/"):
-            paper_id = parsed.path.split("/papers/")[1].strip("/")
-            # Find matching file (old single-file or new directory format)
+        # /api/zotero_html/<paper_id> — serve generated bilingual HTML
+        if parsed.path.startswith("/api/zotero_html/"):
+            paper_id = parsed.path.split("/api/zotero_html/")[1].strip("/")
+            # Find matching file (directory format or single-file format)
+            dir_path = PAPERS_DIR / paper_id / "index.html"
+            if dir_path.exists():
+                html = dir_path.read_text(encoding="utf-8")
+                self._respond_html(html)
+                return
             matches = list(PAPERS_DIR.glob(f"{paper_id}*.html"))
-            if not matches:
-                # Check new directory format: {paper_id}/index.html
-                dir_path = PAPERS_DIR / paper_id / "index.html"
-                if dir_path.exists():
-                    matches = [dir_path]
             if matches:
                 html = matches[0].read_text(encoding="utf-8")
                 self._respond_html(html)
@@ -92,7 +92,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/" or parsed.path == "":
             papers = [p.name for p in PAPERS_DIR.glob("*.html")]
             html = "<h2>Reaper Papers</h2><ul>" + "".join(
-                f'<li><a href="/papers/{p.replace(".html","")}">{p}</a></li>'
+                f'<li><a href="/api/zotero_html/{p.replace(".html","")}">{p}</a></li>'
                 for p in sorted(papers)
             ) + "</ul>"
             self._respond_html(html)
@@ -161,14 +161,14 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     _os.makedirs(_os.path.dirname(out_dir + ".html"), exist_ok=True)
                     save_html(html, out_dir + ".html")
                 
-                # Respond with HTML + output path header
+                # Respond with JSON + output path header (no giant HTML body)
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 if embed and resource_dir:
                     self.send_header("X-Output-Dir", _os.path.abspath(out_dir))
-                self.send_header("Content-Length", str(len(html.encode("utf-8"))))
                 self.end_headers()
-                self.wfile.write(html.encode("utf-8"))
+                payload = json.dumps({"ok": True, "arxiv_id": arxiv_id}, ensure_ascii=False).encode("utf-8")
+                self.wfile.write(payload)
             except Exception as e:
                 # Save error to task for diagnostics
                 from src.task import Task

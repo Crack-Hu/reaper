@@ -274,8 +274,15 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var resp = await fetch(fetchURL);
       log("fetch status: " + resp.status);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
-      html = await resp.text();
-      log("fetch done: " + html.length + " bytes");
+      var outputDir = resp.headers.get("X-Output-Dir");
+      log("output dir: " + outputDir);
+      // For light mode (no outputDir), fetch the HTML from the serving endpoint
+      if (!outputDir) {
+        var htmlResp = await fetch(serverURL() + "/api/zotero_html/" + encodeURIComponent(arxivID));
+        if (!htmlResp.ok) throw new Error("Failed to fetch generated HTML: " + htmlResp.status);
+        html = await htmlResp.text();
+        log("fetched HTML: " + html.length + " bytes");
+      }
     } catch (e) {
       log("fetch FAIL: " + e + " (url: " + fetchURL + ")");
       var msg = String(e).indexOf("NetworkError") !== -1 || String(e).indexOf("fetch") !== -1
@@ -375,7 +382,15 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
       var resp = await fetch(fetchURL);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
-      var html = await resp.text();
+      var outputDir = resp.headers.get("X-Output-Dir");
+
+      // Fetch the generated HTML for the light-mode fallback
+      var html;
+      if (!outputDir) {
+        var htmlResp = await fetch(serverURL() + "/api/zotero_html/" + encodeURIComponent(arxivID));
+        if (!htmlResp.ok) throw new Error("Failed to fetch generated HTML: " + htmlResp.status);
+        html = await htmlResp.text();
+      }
 
       // Remove old attachment
       if (existingAtt) {
