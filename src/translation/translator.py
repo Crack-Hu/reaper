@@ -84,23 +84,38 @@ def call_llm_api(system_prompt, user_prompt, api_key="", base_url="", model="", 
     if not key:
         raise RuntimeError("No API key configured. Set key in config.json.")
 
-    resp = httpx.post(
-        f"{url.rstrip('/')}/chat/completions",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": model_name, "temperature": temperature, "max_tokens": 4096,
-               "messages": [{"role": "system", "content": system_prompt},
-                             {"role": "user", "content": user_prompt}]},
-        timeout=300,
-    )
-    resp.raise_for_status()
-    text = resp.text.strip()
-    try:
-        body = json.loads(text)
-        return body["choices"][0]["message"]["content"].strip()
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"      ⚠ API response parse error: {e}", flush=True)
-        print(f"      raw (first 500): {text[:500]}", flush=True)
-        raise
+    import time
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            resp = httpx.post(
+                f"{url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model_name, "temperature": temperature, "max_tokens": 4096,
+                       "messages": [{"role": "system", "content": system_prompt},
+                                     {"role": "user", "content": user_prompt}]},
+                timeout=300,
+            )
+            resp.raise_for_status()
+            text = resp.text.strip()
+            try:
+                body = json.loads(text)
+                content = body["choices"][0]["message"]["content"]
+                if content is None or not content.strip():
+                    print(f"      ⚠ API returned empty content", flush=True)
+                    print(f"      raw (first 500): {text[:500]}", flush=True)
+                    raise ValueError("API returned empty content")
+                return content.strip()
+            except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
+                print(f"      ⚠ API response parse error: {e}", flush=True)
+                print(f"      raw (first 500): {text[:500]}", flush=True)
+                raise
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"      ⚠ API call failed (attempt {attempt+1}/{max_retries+1}): {e}", flush=True)
+                print(f"      retrying ...", flush=True)
+            else:
+                raise
 
 
 def group_blocks_by_section(blocks):
@@ -367,12 +382,29 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
         return
 
     print(f"      Plan: {total_work} task(s) ({total_new} new + {cache_hits} cached = {cache_hits+uncached} total), pool size {config.TRANSLATION_CONCURRENCY}", flush=True)
+    # Per-section stats for logging
+    section_stats = {}  # heading -> (total_translatable, cached, uncached)
+    for s in sections:
+        heading = s["heading"]
+        total = 0
+        cached_cnt = 0
+        for b in s["paragraphs"]:
+            idx = _idx(b)
+            if idx >= 0 and b.type not in SKIP_TYPES and len(b.text) >= 10:
+                total += 1
+                if results[idx].get("zh"):
+                    cached_cnt += 1
+        section_stats[heading] = (total, cached_cnt, total - cached_cnt)
+
     for i in range(total_work):
         w = full_items[i]
-        label = f"{w[2][:60]}"
+        heading = w[2]
+        label = heading[:60]
         if w[3]:
             label += f" ({w[3]})"
-        print(f"        ({i+1}) {label} — {w[14]} paras", flush=True)
+        batch_size = w[14]
+        total_t, cached_t, _ = section_stats.get(heading, (0, 0, 0))
+        print(f"        ({i+1}) {label} — {batch_size} to translate, {cached_t}/{total_t} cached", flush=True)
 
     print(f"      Starting concurrent ...", flush=True)
     own_pool = (executor is None)
