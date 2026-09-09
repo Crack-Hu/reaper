@@ -13,7 +13,7 @@ SYSTEM_PROMPT = '''You are a professional academic translator specializing in sc
 Your task is to translate English academic text into accurate, fluent, and natural Chinese.
 
 CRITICAL RULES:
-1. Preserve ALL MATH_0, MATH_1, MATH_2 etc. placeholders EXACTLY as-is.
+1. Preserve ALL MATH_0, MATH_1, MATH_2 and FN_0, FN_1, FN_2 etc. placeholders EXACTLY as-is.
 2. Preserve ALL citations like [1], [2,3,4], [5, p.23]
 3. Preserve figure/table references like "Fig. 1", "Figure 2", "Table 3"
 4. Preserve proper nouns: person names, algorithm names, software names

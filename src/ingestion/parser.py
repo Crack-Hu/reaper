@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 @dataclass
 class Block:
     """A translatable content block extracted from ar5iv HTML."""
-    type: str           # "title" | "section" | "para"
+    type: str           # "title" | "section" | "para" | "figcaption" | "note"
     text: str           # plain text with math replaced by ⟨N⟩ placeholders
     level: int = 0
     label: str = ""
@@ -25,13 +25,78 @@ class Block:
         return f"<Block {self.type} L{self.level} \"{preview}\">"
 
 
-# Unified regex: matches h1 title, hN section headings, p paragraphs, figcaption in one left-to-right pass
+# Unified regex: matches h1 title, hN section headings, p paragraphs, figcaption, footnote content in one left-to-right pass
 _TAG_PATTERN = re.compile(
     r'(<h1\b[^>]*class="[^"]*ltx_title_document[^"]*"[^>]*>)'       # title
     r'|(<h\d\b[^>]*class="[^"]*ltx_title_(?:sub)*section[^"]*"[^>]*>)' # section/subsection/subsubsection
     r'|(<p\b[^>]*class="[^"]*ltx_p[^"]*"[^>]*>)'                       # paragraph
-    r'|(<figcaption\b[^>]*class="[^"]*ltx_caption[^"]*"[^>]*>)',       # figure caption
+    r'|(<figcaption\b[^>]*class="[^"]*ltx_caption[^"]*"[^>]*>)'       # figure caption
+    r'|(<(?:span|div)\b[^>]*class="[^"]*ltx_note_content[^"]*"[^>]*>)' # footnote content
 )
+
+# Matches footnote content containers (the translatable part of a footnote)
+_NOTE_PATTERN = re.compile(r'<(?:span|div)\b[^>]*class="[^"]*ltx_note_content[^"]*"[^>]*>')
+
+# Matches the body container of a footnote (holds duplicate content nested in a paragraph)
+_NOTE_OUTER_PATTERN = re.compile(r'<(?:span|div)\b[^>]*class="[^"]*ltx_note_outer[^"]*"[^>]*>')
+
+
+def _strip_note_outer(inner_html: str) -> str:
+    """Remove the full footnote body (ltx_note_outer...) from a text fragment.
+
+    Footnotes are nested inside a paragraph in ar5iv HTML; without stripping the
+    whole span, the footnote content would be duplicated in the paragraph text.
+    """
+    pieces = []
+    pos = 0
+    for m in _NOTE_OUTER_PATTERN.finditer(inner_html):
+        end = _find_matching_close(inner_html, m.start())
+        if end == -1:
+            end = m.end()
+        pieces.append(inner_html[pos:m.start()])
+        pieces.append(" ")
+        pos = end
+    pieces.append(inner_html[pos:])
+    return "".join(pieces)
+
+
+def _find_note_ranges(html: str) -> list[tuple[int, int]]:
+    """Locate (start, end) spans of all footnote content containers.
+
+    Inner elements of a footnote (p, hN, ...) should not be marked separately,
+    because the whole footnote is translated as one block.
+    """
+    ranges: list[tuple[int, int]] = []
+    for note_m in _NOTE_PATTERN.finditer(html):
+        start = note_m.start()
+        end = _find_matching_close(html, start)
+        if end > start:
+            ranges.append((start, end))
+    return ranges
+
+
+def _find_matching_close(html: str, open_pos: int) -> int:
+    """Given the '<' of an opening span/div tag, return index just past its matching close tag."""
+    m = re.match(r'<(?:span|div)\b', html[open_pos:])
+    if not m:
+        return -1
+    depth = 1
+    pos = open_pos + m.end()
+    while pos < len(html):
+        nxt = re.search(r'<(/?)(?:span|div)\b', html[pos:])
+        if not nxt:
+            break
+        nxt_pos = pos + nxt.start()
+        if nxt.group(1) == '/':
+            depth -= 1
+            if depth == 0:
+                close = html.find('>', nxt_pos)
+                return close + 1 if close != -1 else -1
+        else:
+            depth += 1
+        pos = nxt_pos + len(nxt.group(0))
+    return -1
+
 
 # For matching math blocks inside extracted inner HTML
 _MATH_PATTERN = re.compile(r'<math\b.*?</math>', re.DOTALL)
@@ -53,6 +118,7 @@ def _extract_text_with_placeholders(inner_html: str) -> tuple[str, dict[str, str
 
     <math>...</math> → MATH_N — restored in final output.
     <sup class="ltx_note_mark"> → FN_N — LLM-safe placeholder.
+    <span class="ltx_note_outer">...</span> → removed (footnote body handled as its own note block).
     Other HTML tags stripped. Whitespace normalized.
 
     Returns (clean_text, math_map).
@@ -71,7 +137,8 @@ def _extract_text_with_placeholders(inner_html: str) -> tuple[str, dict[str, str
         counter[0] += 1
         return f" {key} "
 
-    text = _MATH_PATTERN.sub(replace_math, inner_html)
+    text = _strip_note_outer(inner_html)
+    text = _MATH_PATTERN.sub(replace_math, text)
     text = _FOOTNOTE_STRIP.sub(replace_footnote, text)
     text = _TAG_STRIP.sub(' ', text)
     text = ' '.join(text.split())
@@ -81,23 +148,29 @@ def _extract_text_with_placeholders(inner_html: str) -> tuple[str, dict[str, str
 def mark_and_extract(html: str) -> tuple[str, list[Block]]:
     """Mark translatable elements AND extract their text in one deterministic pass.
 
-    For each matched element (h1/h2-h6/p) in DOM order:
+    For each matched element (h1/h2-h6/p/figcaption/note) in DOM order:
     1. Insert data-reaper-id="N" marker into the opening tag
     2. Find the element's closing tag, extract inner HTML
-    3. Compute plain text with ⟨N⟩ math placeholders
-    4. Also record the full text content of heading elements
+    3. Compute plain text with MATH_N/FN_N placeholders
+    4. Record the full text content of heading elements
+
+    Footnote content (ltx_note_content) is extracted as a single "note" block;
+    elements nested inside a footnote are not marked separately.
 
     Returns:
         (marked_html, blocks) — blocks[i] ↔ element with data-reaper-id="i"
     """
     blocks: list[Block] = []
-    positions: list[tuple[int, int, int]] = []  # (tag_start, inner_start, close_end)
-
+    # Pass 0: footnote content spans — inner elements are not marked separately
+    note_ranges = _find_note_ranges(html)
+    # (the pass-2 loop below re-scans marked_html; rest of the body follows)
     # ---- Pass 1: mark all elements ----
     def tag_replacer(m: re.Match) -> str:
         idx = len(blocks)
         full_tag = m.group(0)
-        tag_start = m.start()
+        # Skip elements nested inside footnote content (footnote handled as a whole)
+        if any(start < m.start() < end for start, end in note_ranges):
+            return full_tag
 
         # Determine type
         if 'ltx_title_document' in full_tag:
@@ -108,21 +181,18 @@ def mark_and_extract(html: str) -> tuple[str, list[Block]]:
             btype, level = "section", 2
         elif 'ltx_title_section' in full_tag:
             btype, level = "section", 1
+        elif 'ltx_note_content' in full_tag:
+            btype, level = "note", 0
         elif 'ltx_caption' in full_tag:
             btype, level = "figcaption", 0
         else:
             btype, level = "para", 0
 
         tagged = full_tag.replace('>', f' data-reaper-id="{idx}">', 1)
-        # Record tentative position (will be adjusted after full marking)
         blocks.append(Block(type=btype, text="", level=level))
-
-        # Store the match position so pass 2 can locate this element
-        # We'll re-scan marked_html to find positions after all replacements
         return tagged
 
     marked_html = _TAG_PATTERN.sub(tag_replacer, html)
-
     # ---- Pass 2: extract text for each marked element ----
     # Re-scan marked_html for data-reaper-id markers to find element boundaries
     for idx in range(len(blocks)):

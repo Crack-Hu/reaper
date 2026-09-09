@@ -402,18 +402,47 @@ def _inject_translation(html: str, block_index: int, zh_text: str, inline: bool 
         f'{"&nbsp;&nbsp;" if inline else "<br>"}<span class="reaper-zh-text">{zh_text}</span>'
         f'</span>'
     )
-    pattern = re.compile(
-        rf'(<(\w+)\b[^>]*{re.escape(marker)}[^>]*>.*?)(</\2\s*>)',
-        re.DOTALL
-    )
+    pos = html.find(marker)
+    if pos == -1:
+        return html
+    tag_beg = html.rfind('<', 0, pos)
+    tag_match = re.match(r'<(\w+)', html[tag_beg:])
+    if not tag_match:
+        return html
+    tag_name = tag_match.group(1)
+    close = _find_close_tag(html, tag_beg, tag_name)
+    if close == -1:
+        return html
+    if 'reaper-zh' in html[tag_beg:close]:
+        return html
+    # Insert the translation just before the element's closing tag
+    return html[:close] + wrapper + html[close:]
 
-    def replacer(m):
-        inner, close = m.group(1), m.group(3)
-        if 'reaper-zh' in inner + close:
-            return m.group(0)
-        return inner + wrapper + close
 
-    return pattern.sub(replacer, html, count=1)
+def _find_close_tag(html: str, tag_beg: int, tag_name: str) -> int:
+    """Return the start index of the matching close tag for an opening tag."""
+    open_re = re.compile(rf'<{re.escape(tag_name)}\b')
+    close_re = re.compile(rf'</{re.escape(tag_name)}\s*>')
+    depth = 0
+    pos = tag_beg + len(f'<{tag_name}')
+    while True:
+        next_open = open_re.search(html, pos)
+        next_close = close_re.search(html, pos)
+        if next_close is None:
+            return -1
+        if next_open is not None and next_open.start() < next_close.start():
+            # Skip self-closing tags (e.g. <span/>)
+            gt = html.find('>', next_open.start())
+            if gt != -1 and html[gt - 1:gt] == '/':
+                pos = gt + 1
+                continue
+            depth += 1
+            pos = gt + 1 if gt != -1 else next_open.end()
+            continue
+        if depth == 0:
+            return next_close.start()
+        depth -= 1
+        pos = next_close.end()
 
 
 # === Main ===
@@ -502,6 +531,9 @@ def render_bilingual_html(
         zh = b.get("zh", "").strip()
         if not zh:
             continue
+        # Footnote placeholders (FN_N) refer to <sup> marks already present in the
+        # original HTML; drop them from the rendered Chinese text.
+        zh = re.sub(r'\s*FN_\d+\s*', '', zh).strip()
         math_map = b.get("math_map", {})
         if math_map:
             zh = restore_math_in_translation(zh, math_map)

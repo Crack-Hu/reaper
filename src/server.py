@@ -295,7 +295,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                           for b in cached_blocks]
             # Update task for UI progress
             hashes = [b["hash"] for b in cached_blocks]
-            if not task.blocks:
+            if not task.blocks or len(task.blocks) != len(hashes):
                 task.set_blocks(hashes)
                 done_indices = [i for i, b in enumerate(cached_blocks) if b.get("zh")]
                 for i in done_indices:
@@ -317,8 +317,17 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
             # Compute hashes and init task blocks
             hashes = [b["hash"] for b in paper_cache.blocks]
-            if not task.blocks:
+            if not task.blocks or len(task.blocks) != len(hashes):
+                # Block structure changed (e.g. new note blocks) → rebuild,
+                # preserving done status by block hash.
+                old_done = {b["hash"] for b in task.blocks if b.get("done")}
                 task.set_blocks(hashes)
+                for i, h in enumerate(hashes):
+                    if h in old_done:
+                        task.blocks[i]["done"] = True
+                        task.translated += 1
+                task._touch()
+                task._save()
 
             # Step 3: Translate
             print(f"  {tag} [3/4] Translating ...", flush=True)
