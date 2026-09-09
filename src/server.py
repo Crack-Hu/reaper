@@ -281,8 +281,9 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         paper_cache = PaperCache.load(arxiv_id)
         term_dict = TermDictionary()
 
-        # Check if HTML hash matches and cache has translations → skip parse + translate
-        if paper_cache.match(raw_html) and paper_cache.translated_count > 0:
+        # Check if HTML hash matches and ALL blocks are translated → skip parse + translate
+        all_done = paper_cache.match(raw_html) and paper_cache.translated_count == len(paper_cache)
+        if all_done:
             print(f"  {tag} [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
             task.set_parsing()
             task.set_translating()
