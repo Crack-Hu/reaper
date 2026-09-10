@@ -3,6 +3,7 @@ document.addEventListener("DOMContentLoaded",function(){
     bar.className = "reaper-toolbar";
 
     var tocBtn = document.createElement("button");
+    tocBtn.id = "reaper-toc-btn";
     tocBtn.innerHTML = "\u2630";
     tocBtn.title = "Toggle TOC";
     bar.appendChild(tocBtn);

@@ -12,7 +12,8 @@
 }
 .reaper-toolbar button#reaper-translation-btn{font-size:.9rem}
 .reaper-toolbar button:hover{background:var(--border-light-color,rgba(0,0,0,0.1))}
-.reaper-toolbar button.active{background:#cce5ff;border-color:#2563eb}
+/* 仅 TOC 菜单按钮使用蓝色高亮表示状态（图标无变化）；其余按钮状态由图标/文字体现 */
+.reaper-toolbar button#reaper-toc-btn.active{background:#cce5ff;border-color:#2563eb}
 
 /* ── TOC sidebar — slides from left under toolbar ── */
 nav.ltx_page_navbar{
