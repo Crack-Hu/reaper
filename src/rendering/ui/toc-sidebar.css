@@ -7,8 +7,8 @@
 }
 .reaper-toolbar button{
     background:none;border:1px solid var(--border-light-color,#999);border-radius:4px;
-    cursor:pointer;font-size:1rem;padding:2px 8px;color:var(--text-color,#292929);
-    min-width:30px;line-height:1.3;text-align:center
+    cursor:pointer;font-size:1rem;color:var(--text-color,#292929);
+    box-sizing:border-box;width:34px;padding:2px 0;line-height:1.3;text-align:center
 }
 .reaper-toolbar button#reaper-translation-btn{font-size:.9rem}
 .reaper-toolbar button:hover{background:var(--border-light-color,rgba(0,0,0,0.1))}
