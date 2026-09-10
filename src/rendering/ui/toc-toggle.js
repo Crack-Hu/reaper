@@ -12,6 +12,11 @@ document.addEventListener("DOMContentLoaded",function(){
     themeBtn.title = "Toggle dark/light mode";
     bar.appendChild(themeBtn);
 
+    var tlBtn = document.createElement("button");
+    tlBtn.id = "reaper-translation-btn";
+    tlBtn.title = "Toggle translation on/off";
+    bar.appendChild(tlBtn);
+
     // Source toggle button (added by reaper-source-toggle.js logic)
     var srcBtn = document.createElement("button");
     srcBtn.id = "reaper-source-btn";
@@ -46,6 +51,20 @@ document.addEventListener("DOMContentLoaded",function(){
             localStorage.setItem("reaper-theme", "light");
         }
     };
+
+    // Translation on/off toggle
+    var translationOn = localStorage.getItem("reaper-translation") !== "off";
+    if(!translationOn) document.body.classList.add("translation-off");
+    tlBtn.textContent = translationOn ? "\u4E2D" : "En";
+    tlBtn.classList.toggle("active", translationOn);
+    tlBtn.onclick = function(){
+        translationOn = !translationOn;
+        document.body.classList.toggle("translation-off", !translationOn);
+        tlBtn.classList.toggle("active", translationOn);
+        tlBtn.textContent = translationOn ? "\u4E2D" : "En";
+        localStorage.setItem("reaper-translation", translationOn ? "on" : "off");
+    };
+
     // TOC subtree toggle (click on toggle icon or text)
     document.addEventListener("click",function(e){
         var icon=e.target.closest(".reaper-toc-toggle-icon");
