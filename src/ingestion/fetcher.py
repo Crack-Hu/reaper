@@ -73,15 +73,18 @@ def _try_ar5iv(arxiv_id: str) -> str:
     return html
 
 
-def _cache_ar5iv_images(html: str, arxiv_id: str):
+def _cache_ar5iv_images(html: str, arxiv_id: str, img_dir: Path | None = None):
     """Download all <img> files referenced in ar5iv HTML to local cache.
 
     ar5iv generates images during LaTeXML conversion as temporary files.
     They may not be available later from CDN, so we cache them immediately.
+
+    `img_dir` defaults to the paper's standard source directory.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
-    img_dir = Path(config.source_dir(arxiv_id))
+    if img_dir is None:
+        img_dir = Path(config.source_dir(arxiv_id))
     urls = set(re.findall(r'<img[^>]*src="([^"]+)"', html))
     urls |= set(re.findall(r'<object[^>]*data="([^"]+)"', html))
     urls = {u for u in urls if not u.startswith('data:') and not u.startswith('http')}
@@ -299,15 +302,19 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
 
     Returns a FetchedPage with html, source_type, arxiv_id, img_dir, page_url.
 
+    cache_dir: **该论文自己的目录**（不是所有论文共用的父目录）。缓存的 HTML
+               放在 `{cache_dir}/{arxiv_id}.html`，引用的图片放在 `{cache_dir}/`。
+               默认使用 `config.source_dir(arxiv_id)`。
     force_source: override the source order (e.g. "ar5iv", "arxiv_html").
                   Skips cache when set since cached content may be from a different source.
     """
     from .fetched_page import FetchedPage
 
     arxiv_id = arxiv_id_from_url(arxiv_id_or_url)
+    paper_dir = Path(cache_dir) if cache_dir else Path(config.source_dir(arxiv_id))
 
     def _build_fp(src_type: str, html: str) -> FetchedPage:
-        img_dir = Path(config.source_dir(arxiv_id))
+        img_dir = paper_dir
         # Derive page_url from HTML metadata first, then fall back to source type
         page_url = ""
         # Try <link rel="canonical">
@@ -337,8 +344,8 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
 
     # 检查缓存
     # Skip cache when forcing a specific source (may differ from cached)
-    if cache_dir and not force_source:
-        cache_path = Path(cache_dir) / arxiv_id / f"{arxiv_id}.html"
+    if not force_source:
+        cache_path = paper_dir / f"{arxiv_id}.html"
         if cache_path.exists():
             html = cache_path.read_text(encoding="utf-8")
             # Validate cached content
@@ -364,7 +371,7 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
                     cached_src = "ar5iv"
             print(f"        (cached from {cached_src})", flush=True)
             # Try to cache images even for cached HTML (may have been missed on first fetch)
-            _cache_ar5iv_images(html, arxiv_id)
+            _cache_ar5iv_images(html, arxiv_id, paper_dir)
             return _build_fp(cached_src, html)
 
     # 按优先级尝试各来源
@@ -382,11 +389,9 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
             print(f"        [{i+1}/{len(sources)}] trying {src_type} ...", flush=True)
             html = _SOURCES[src_type](arxiv_id)
 
-            # Save to cache
-            if cache_dir:
-                paper_dir = Path(cache_dir) / arxiv_id
-                paper_dir.mkdir(parents=True, exist_ok=True)
-                (paper_dir / f"{arxiv_id}.html").write_text(html, encoding="utf-8")
+            # Save to cache (one file per paper inside its own directory)
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / f"{arxiv_id}.html").write_text(html, encoding="utf-8")
 
             return _build_fp(src_type, html)
         except SourceError as e:
