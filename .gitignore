@@ -41,3 +41,10 @@ docs/
 materials/
 ref_repo/
 *.zip
+
+# ── Scratch / downloaded reference pages ──
+old.html
+t.html
+openalex.md
+parse.rst
+pyb.py
