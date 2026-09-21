@@ -10,6 +10,7 @@ All generated files stored in data/. See config.json for settings.
 import os
 import sys
 import json
+import threading
 import http.server
 import urllib.parse
 from pathlib import Path
@@ -44,12 +45,14 @@ print(f"Log: {LOG_PATH}")
 from src.translation.dictionary import TermDictionary
 
 _term_dict_instance = None
+_term_dict_lock = threading.Lock()
 
 def get_term_dict():
     global _term_dict_instance
-    if _term_dict_instance is None:
-        _term_dict_instance = TermDictionary()
-    return _term_dict_instance
+    with _term_dict_lock:
+        if _term_dict_instance is None:
+            _term_dict_instance = TermDictionary()
+        return _term_dict_instance
 
 def load_term_dict() -> dict:
     return get_term_dict().user
@@ -142,6 +145,22 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 self._respond_json({"error": "missing arxiv_id"}, 400)
                 return
 
+            # 并发生成守卫：第二个请求直接被告知「正在处理中」，不重复跑流水线
+            if not try_begin_generation(arxiv_id):
+                payload = json.dumps({
+                    "ok": False,
+                    "status": "processing",
+                    "arxiv_id": arxiv_id,
+                    "message": f"{arxiv_id} 正在处理中，请等待完成",
+                }, ensure_ascii=False).encode("utf-8")
+                self.send_response(202)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("X-Reaper-Status", "processing")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
             # Generate complete HTML, save to directory, return path
             try:
                 from src.rendering.renderer import save_html, zotero_compatible_html
@@ -186,6 +205,8 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     pass
                 err = f"<html><body><h1>Error</h1><p>{e}</p></body></html>"
                 self._respond_html(err)
+            finally:
+                end_generation(arxiv_id)
             return
 
         # /api/stop
@@ -413,16 +434,44 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
 # ── Shared translation pool (one per server process) ──
 _translation_pool = None
+_pool_lock = threading.Lock()
 _active_caches: dict[str, "PaperCache"] = {}  # paper_id → cache
 _active_tasks: dict[str, "Task"] = {}  # paper_id → task
+
+# ── 并发生成守卫 ──
+# /api/generate 很贵（下载 + 解析 + LLM 翻译）。同一篇论文的两个并发请求会
+# 重复每个阶段并把 API 花费翻倍，所以后到的调用者被告知「正在处理中」。
+_inflight_lock = threading.Lock()
+_inflight: set[str] = set()
+
+
+def try_begin_generation(arxiv_id: str) -> bool:
+    """预约一篇论文的生成。已在处理中则返回 False。"""
+    with _inflight_lock:
+        if arxiv_id in _inflight:
+            return False
+        _inflight.add(arxiv_id)
+        return True
+
+
+def end_generation(arxiv_id: str) -> None:
+    with _inflight_lock:
+        _inflight.discard(arxiv_id)
+
+
+def inflight_papers() -> list[str]:
+    with _inflight_lock:
+        return sorted(_inflight)
+
 
 def get_translation_pool():
     from concurrent.futures import ThreadPoolExecutor
     global _translation_pool
-    if _translation_pool is None:
-        _translation_pool = ThreadPoolExecutor(max_workers=config.TRANSLATION_CONCURRENCY)
-        print(f"  Translation pool: {config.TRANSLATION_CONCURRENCY} workers", flush=True)
-    return _translation_pool
+    with _pool_lock:
+        if _translation_pool is None:
+            _translation_pool = ThreadPoolExecutor(max_workers=config.TRANSLATION_CONCURRENCY)
+            print(f"  Translation pool: {config.TRANSLATION_CONCURRENCY} workers", flush=True)
+        return _translation_pool
 
 def main():
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
