@@ -81,7 +81,7 @@ def _cache_ar5iv_images(html: str, arxiv_id: str):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
-    img_dir = Path(config.AR5IV_DIR) / arxiv_id
+    img_dir = Path(config.source_dir(arxiv_id))
     urls = set(re.findall(r'<img[^>]*src="([^"]+)"', html))
     urls |= set(re.findall(r'<object[^>]*data="([^"]+)"', html))
     urls = {u for u in urls if not u.startswith('data:') and not u.startswith('http')}
@@ -145,9 +145,6 @@ def _cache_ar5iv_images(html: str, arxiv_id: str):
 
 # ── Source: ar5ivist Docker ────────────────────────────────────
 
-ARXIV_SOURCE_DIR = os.path.join(config.DATA_DIR, "arxiv_source")
-AR5IVIST_OUTPUT_DIR = os.path.join(config.DATA_DIR, "ar5ivist")
-AR5IVIST_DOCKER_IMAGE = config.AR5IVIST_DOCKER_IMAGE
 
 
 def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
@@ -193,8 +190,8 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
     Source: data/arxiv_source/{id}/  (只放 tex 源文件)
     Output: data/ar5ivist/{id}/html/ (Docker 生成的 HTML + 图片)
     """
-    source_dir = Path(ARXIV_SOURCE_DIR) / arxiv_id
-    output_dir = Path(AR5IVIST_OUTPUT_DIR) / arxiv_id
+    source_dir = Path(config.source_dir(arxiv_id))
+    output_dir = Path(config.source_dir(arxiv_id))
 
     # Step 1: Download source
     print(f"          downloading source for {arxiv_id} ...", flush=True)
@@ -310,7 +307,7 @@ def fetch_html(arxiv_id_or_url: str, cache_dir: str | None = None,
     arxiv_id = arxiv_id_from_url(arxiv_id_or_url)
 
     def _build_fp(src_type: str, html: str) -> FetchedPage:
-        img_dir = Path(config.AR5IV_DIR) / arxiv_id
+        img_dir = Path(config.source_dir(arxiv_id))
         # Derive page_url from HTML metadata first, then fall back to source type
         page_url = ""
         # Try <link rel="canonical">

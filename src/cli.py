@@ -86,7 +86,7 @@ def main():
 
     # Step 4: Render
     print(f"[4/4] 渲染双语 HTML ...")
-    output_path = args.output or os.path.join(config.OUTPUT_DIR, f"{arxiv_id}.html")
+    output_path = args.output or os.path.join(config.reaper_html_dir(arxiv_id), "index.html")
 
     html_output = render_bilingual_html(
         marked_html=marked_html,

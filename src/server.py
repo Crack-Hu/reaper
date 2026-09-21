@@ -20,8 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import config
 
-PAPERS_DIR = Path(config.ZOTERO_DIR)
-AR5IV_DIR = Path(config.AR5IV_DIR)
+PAPERS_DIR = Path(config.PAPERS_DIR)  # all papers live under data/papers/
 LOG_PATH = Path(config.LOG_DIR) / "server.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 _log_file = open(str(LOG_PATH), "a", encoding="utf-8")
@@ -64,6 +63,12 @@ def save_term_dict(data: dict):
 class ReaperHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+
+        # /api/chat/* (implemented in src/chat/api.py)
+        if parsed.path.startswith("/api/chat"):
+            from src.chat import api as chat_api
+            if chat_api.handle_get(self, parsed, urllib.parse.parse_qs(parsed.query)):
+                return
 
         # /api/zotero_html/<paper_id> — serve generated bilingual HTML
         if parsed.path.startswith("/api/zotero_html/"):
@@ -108,12 +113,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             # Clear caches (excluding dictionary)
             import os as _os, glob as _glob, shutil as _shutil
             paths = [
-                config.AR5IV_DIR + "/" + arxiv_id,  # ar5iv HTML cache
-                config.CACHE_DIR + "/" + arxiv_id + ".json",  # translation cache
-                _os.path.join(config.DATA_DIR, "tasks", arxiv_id + ".json"),  # task state
-                config.ZOTERO_DIR + "/" + arxiv_id + ".html",  # old single-file format
-                config.ZOTERO_DIR + "/" + arxiv_id,  # directory format (with or without _source)
-                config.ZOTERO_DIR + "/" + arxiv_id + "_files",  # legacy _files dir
+                config.source_dir(arxiv_id),  # source material
+                config.translation_cache_dir(arxiv_id) + "/cache.json",  # translation cache
+                config.task_state_path(arxiv_id),  # task state
+                config.reaper_html_dir(arxiv_id) + "/index.html",  # reaper HTML
+                config.reaper_html_dir(arxiv_id),  # directory format
+                config.reaper_html_dir(arxiv_id) + "_files",  # legacy _files dir (keep for migration)
             ]
             cleared = []
             for p in paths:
@@ -142,7 +147,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 from src.rendering.renderer import save_html, zotero_compatible_html
                 import os as _os, shutil as _shutil
                 # Output directory: data/zotero/{arxiv_id}[_{source}]/
-                out_dir = _os.path.join(config.ZOTERO_DIR, arxiv_id)
+                out_dir = config.reaper_html_dir(arxiv_id)
                 if source:
                     out_dir += f"_{source}"
                 
@@ -174,7 +179,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 from src.task import Task
                 from src import config as cfg
                 try:
-                    task = Task.load(arxiv_id, os.path.join(cfg.DATA_DIR, "tasks"))
+                    task = Task.load(arxiv_id)
                     if not task.is_done:
                         task.set_error(str(e))
                 except Exception:
@@ -237,6 +242,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b"{}"
         data = json.loads(body)
 
+        # /api/chat/* (implemented in src/chat/api.py)
+        if parsed.path.startswith("/api/chat"):
+            from src.chat import api as chat_api
+            if chat_api.handle_post(self, parsed, data):
+                return
+
         # /api/terms
         if parsed.path == "/api/terms":
             save_term_dict(data.get("terms", {}))
@@ -266,14 +277,13 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         from src import config
 
         tag = f"[{arxiv_id}]"
-        tasks_dir = os.path.join(config.DATA_DIR, "tasks")
-        task = Task.load(arxiv_id, tasks_dir)
+        task = Task.load(arxiv_id)
         _active_tasks[arxiv_id] = task
 
         # Step 1: Fetch
         print(f"  {tag} [1/4] Fetching HTML ...", flush=True)
         task.set_fetching()
-        fp = fetch_html(arxiv_id, cache_dir=str(config.AR5IV_DIR), force_source=force_source)
+        fp = fetch_html(arxiv_id, cache_dir=config.source_dir(arxiv_id), force_source=force_source)
         raw_html = fp.html
         print(f"  {tag}        {len(raw_html):,} bytes", flush=True)
 
@@ -416,13 +426,14 @@ def get_translation_pool():
 
 def main():
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
-    AR5IV_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Background reaper: stops idle pi processes so they don't accumulate.
+    from src.chat.session import registry as _chat_registry
+    _chat_registry.start_reaper()
     print(f"Reaper Backend")
-    print(f"  ar5iv cache: {AR5IV_DIR}")
     print(f"  Zotero output: {PAPERS_DIR}")
     print(f"\n  → http://localhost:{config.SERVER_PORT}")
-    print(f"  ar5iv dir: {AR5IV_DIR}")
-    print(f"  zotero dir: {PAPERS_DIR}\n")
+    print(f"  paper data root: {config.PAPERS_DIR}\n")
 
     server = http.server.ThreadingHTTPServer((config.SERVER_HOST, config.SERVER_PORT), ReaperHandler)
     try:
