@@ -296,6 +296,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         _active_tasks[arxiv_id] = task
 
         # Step 1: Fetch
+        logbook.set_progress(phase="[1/4] 获取 HTML")
         print(f"  [1/4] Fetching HTML ...", flush=True)
         task.set_fetching()
         fp = fetch_html(arxiv_id, force_source=force_source)   # caches under source_dir(arxiv_id)
@@ -309,6 +310,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         # Check if HTML hash matches and ALL blocks are translated → skip parse + translate
         all_done = paper_cache.match(raw_html) and paper_cache.translated_count == len(paper_cache)
         if all_done:
+            logbook.set_progress(phase="[2+3/4] 缓存命中")
             print(f"  [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
             task.set_parsing()
             task.set_translating()
@@ -327,6 +329,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     task.mark_done(i)
         else:
             # Step 2: Parse
+            logbook.set_progress(phase="[2/4] 解析段落")
             print(f"  [2/4] Parsing blocks ...", flush=True)
             task.set_parsing()
             marked_html, blocks = mark_and_extract(raw_html)
@@ -355,6 +358,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 task._save()
 
             # Step 3: Translate
+            logbook.set_progress(phase="[3/4] 翻译中")
             print(f"  [3/4] Translating ...", flush=True)
             task.set_translating()
 
@@ -383,9 +387,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             paper_cache.save()
 
             cnt = sum(1 for t in translated if t.get("zh") and t["zh"] != t.get("en", ""))
+            if task.total:
+                logbook.set_progress(pct=task.translated / task.total * 100)
             print(f"         {cnt} blocks translated (task: {task.progress})", flush=True)
 
         # Step 4: Render
+        logbook.set_progress(phase="[4/4] 渲染 HTML")
         print(f"  [4/4] Rendering HTML ...", flush=True)
         task.set_rendering()
         result = render_bilingual_html(

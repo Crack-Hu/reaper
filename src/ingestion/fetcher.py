@@ -7,7 +7,7 @@ import tarfile
 import os
 import threading
 from pathlib import Path
-from .. import config
+from .. import config, logbook as _logbook
 
 
 class SourceError(Exception):
@@ -94,7 +94,6 @@ def _cache_ar5iv_images(html: str, arxiv_id: str, img_dir: Path | None = None):
     img_dir.mkdir(parents=True, exist_ok=True)
     total = len(urls)
     progress = {"ok": 0, "fail": 0, "lock": threading.Lock()}
-    last_milestone = [0]
 
     # Extract canonical page URL from HTML for Referer
     import re as _re
@@ -138,12 +137,14 @@ def _cache_ar5iv_images(html: str, arxiv_id: str, img_dir: Path | None = None):
             f.result()  # raise if any exception (ours are caught inside)
             with progress["lock"]:
                 done = progress["ok"] + progress["fail"]
-                pct = done * 100 // total
-                # Print at every 10% milestone (10,20,30...)
-                if pct >= last_milestone[0] + 10 or done == total:
-                    bar = "#" * (pct // 5) + "-" * ((100 - pct) // 5)
-                    print(f"          images [{bar}] {done}/{total}", flush=True)
-                    last_milestone[0] = pct - (pct % 10)  # snap to last milestone
+                # 进度只更新状态面板（不产生日志行）：并行时不会刷屏，
+                # 日志文件也不会被进度条灌满。非 TTY 下 set_progress 是无害的 no-op。
+                _logbook.set_progress(note=f"图片 {done}/{total}",
+                                      pct=done * 100.0 / max(total, 1))
+
+    _logbook.set_progress(note="")
+    print(f"          images: {progress['ok']}/{total} cached"
+          + (f", {progress['fail']} failed" if progress["fail"] else ""), flush=True)
 
 
 # ── Source: ar5ivist Docker ────────────────────────────────────

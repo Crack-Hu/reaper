@@ -11,7 +11,7 @@ import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..ingestion.parser import restore_math_in_translation
-from .. import config
+from .. import config, logbook as _logbook
 
 AR5IV_BASE = "https://ar5iv.labs.arxiv.org"
 UI_DIR = Path(__file__).parent / "ui"  # toc-sidebar.css, toc-toggle.js
@@ -237,19 +237,17 @@ def _process_resources(html: str, fp: "FetchedPage",
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(download_one, u): u for u in all_urls}
         done_count = 0
-        last_pct = 0
         for f in as_completed(futures):
             url, (local_path, cdn_url) = f.result()
             url_to_result[url] = (local_path, cdn_url)
             done_count += 1
-            pct = done_count * 100 // total
-            if pct >= last_pct + 10 or done_count == total:
-                bar = "#" * (pct // 5) + "-" * ((100 - pct) // 5)
-                saved = sum(1 for v in url_to_result.values() if v[0] is not None)
-                print(f"        embed [{bar}] {done_count}/{total} ({saved} saved)", flush=True)
-                last_pct = pct - (pct % 10)
+            # 进度只更新状态面板，不产生日志行（并行时不会刷屏）
+            _logbook.set_progress(note=f"资源 {done_count}/{total}",
+                                  pct=done_count * 100.0 / max(total, 1))
 
+    _logbook.set_progress(note="")
     saved = sum(1 for v in url_to_result.values() if v[0] is not None)
+    print(f"        assets: {saved}/{total} saved locally, rest use CDN", flush=True)
     print(f"        done: {saved}/{total} saved locally, rest use CDN", flush=True)
 
     # Replace tags: add local src + data-cdn fallback
