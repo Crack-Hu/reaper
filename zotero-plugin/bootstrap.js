@@ -292,6 +292,17 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var resp = await fetch(fetchURL);
       log("fetch status: " + resp.status);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
+
+      // 服务器不会为同一篇论文同时跑两次生成。202 表示已有一个请求在处理，
+      // 这次不再重复跑整条流水线（也避免双倍的 LLM 花费）。
+      if (resp.headers.get("X-Reaper-Status") === "processing") {
+        var waitMsg = arxivID + " 正在处理中，请等待完成";
+        if (pw) { pw.addDescription(waitMsg); pw.startCloseTimer(8000); }
+        else { flash("Reaper", waitMsg); }
+        log(waitMsg);
+        return;
+      }
+
       var outputDir = resp.headers.get("X-Output-Dir");
       log("output dir: " + outputDir);
       // For light mode (no outputDir), fetch the HTML from the serving endpoint
@@ -400,6 +411,13 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
       var resp = await fetch(fetchURL);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
+
+      // 已在处理中：不要在此重复跑一遍（会双倍 LLM 花费）
+      if (resp.headers.get("X-Reaper-Status") === "processing") {
+        flash("Reaper", arxivID + " 正在处理中，请等待完成");
+        return;
+      }
+
       var outputDir = resp.headers.get("X-Output-Dir");
 
       // Fetch the generated HTML for the light-mode fallback
