@@ -14,7 +14,6 @@ import threading
 import http.server
 import urllib.parse
 from pathlib import Path
-from datetime import datetime
 
 # Allow imports from project root (src.ingestion, src.translation, etc.)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,25 +21,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src import config
 
 PAPERS_DIR = Path(config.PAPERS_DIR)  # all papers live under data/papers/
-LOG_PATH = Path(config.LOG_DIR) / "server.log"
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-_log_file = open(str(LOG_PATH), "a", encoding="utf-8")
-_original_print = print
 
-def _log(*args, **kwargs):
-    msg = " ".join(str(a) for a in args)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] {msg}"
-    _original_print(line, **kwargs)
-    _log_file.write(line + "\n")
-    _log_file.flush()
-
-# Replace print globally
-import builtins
-builtins.print = lambda *a, **kw: _log(*a, **kw) if a and str(a[0]).strip() else _original_print(*a, **kw)
+# 日志：每个任务一份独立文件 + 紧凑行格式（见 src/logbook.py）
+from src import logbook
+logbook.configure(config.LOG_DIR)
 
 print(f"=== Reaper Server started ===")
-print(f"Log: {LOG_PATH}")
+print(f"Log: {logbook.merged_log_path()}")
+print(f"Per-paper logs: {config.LOG_DIR}/papers/")
 
 from src.translation.dictionary import TermDictionary
 
@@ -280,14 +268,21 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
     def _generate_paper(self, arxiv_id: str, embed_images: bool = True,
                        force_source: str | None = None,
                        resource_dir: str | None = None) -> str:
-        """Run the full pipeline with state tracking.
+        """Run the pipeline with per-task logging context.
 
-        Args:
-            arxiv_id: paper ID
-            embed_images: True = download assets + CDN fallback, False = CDN only
-            force_source: override default source order (e.g. "ar5iv", "arxiv_html")
-            resource_dir: if set, save assets to {resource_dir}/assets/
+        All output produced while this runs is tagged with `arxiv_id` and
+        mirrored into `logs/papers/{arxiv_id}.log`, so concurrent tasks stay
+        readable even though they interleave on stdout.
         """
+        with logbook.task(arxiv_id):
+            return self._generate_paper_impl(
+                arxiv_id, embed_images=embed_images,
+                force_source=force_source, resource_dir=resource_dir)
+
+    def _generate_paper_impl(self, arxiv_id: str, embed_images: bool = True,
+                             force_source: str | None = None,
+                             resource_dir: str | None = None) -> str:
+        """The actual pipeline. Callers go through `_generate_paper`."""
         from src.ingestion.fetcher import fetch_html
         from src.ingestion.parser import mark_and_extract
         from src.translation.translator import translate_blocks
@@ -297,16 +292,15 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         from src.task import Task
         from src import config
 
-        tag = f"[{arxiv_id}]"
         task = Task.load(arxiv_id)
         _active_tasks[arxiv_id] = task
 
         # Step 1: Fetch
-        print(f"  {tag} [1/4] Fetching HTML ...", flush=True)
+        print(f"  [1/4] Fetching HTML ...", flush=True)
         task.set_fetching()
-        fp = fetch_html(arxiv_id, cache_dir=config.source_dir(arxiv_id), force_source=force_source)
+        fp = fetch_html(arxiv_id, force_source=force_source)   # caches under source_dir(arxiv_id)
         raw_html = fp.html
-        print(f"  {tag}        {len(raw_html):,} bytes", flush=True)
+        print(f"         {len(raw_html):,} bytes", flush=True)
 
         # Load unified paper cache
         paper_cache = PaperCache.load(arxiv_id)
@@ -315,7 +309,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
         # Check if HTML hash matches and ALL blocks are translated → skip parse + translate
         all_done = paper_cache.match(raw_html) and paper_cache.translated_count == len(paper_cache)
         if all_done:
-            print(f"  {tag} [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
+            print(f"  [2+3/4] HTML unchanged — restoring {len(paper_cache)} blocks from cache ({paper_cache.translated_count} translated)", flush=True)
             task.set_parsing()
             task.set_translating()
             marked_html, _ = mark_and_extract(raw_html)  # re-parse for markers only
@@ -333,10 +327,10 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     task.mark_done(i)
         else:
             # Step 2: Parse
-            print(f"  {tag} [2/4] Parsing blocks ...", flush=True)
+            print(f"  [2/4] Parsing blocks ...", flush=True)
             task.set_parsing()
             marked_html, blocks = mark_and_extract(raw_html)
-            print(f"  {tag}        {len(blocks)} blocks extracted", flush=True)
+            print(f"         {len(blocks)} blocks extracted", flush=True)
 
             # Update cache with new HTML hash + blocks (merges old translations by hash)
             # NOTE: Do NOT save() here — only save after merge_translations() so that
@@ -344,7 +338,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             paper_cache.update(raw_html, fp.source_type, blocks)
             matched = sum(1 for b in paper_cache.blocks if b.get("zh"))
             if matched:
-                print(f"  {tag}        {matched}/{len(blocks)} blocks matched from previous cache", flush=True)
+                print(f"         {matched}/{len(blocks)} blocks matched from previous cache", flush=True)
 
             # Compute hashes and init task blocks
             hashes = [b["hash"] for b in paper_cache.blocks]
@@ -361,11 +355,11 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 task._save()
 
             # Step 3: Translate
-            print(f"  {tag} [3/4] Translating ...", flush=True)
+            print(f"  [3/4] Translating ...", flush=True)
             task.set_translating()
 
             _active_caches[arxiv_id] = paper_cache
-            print(f"  {tag}        {paper_cache.translated_count} cached translations loaded", flush=True)
+            print(f"         {paper_cache.translated_count} cached translations loaded", flush=True)
 
             translated = translate_blocks(
                 blocks, term_dict=term_dict, paper_id=arxiv_id,
@@ -389,10 +383,10 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             paper_cache.save()
 
             cnt = sum(1 for t in translated if t.get("zh") and t["zh"] != t.get("en", ""))
-            print(f"  {tag}        {cnt} blocks translated (task: {task.progress})", flush=True)
+            print(f"         {cnt} blocks translated (task: {task.progress})", flush=True)
 
         # Step 4: Render
-        print(f"  {tag} [4/4] Rendering HTML ...", flush=True)
+        print(f"  [4/4] Rendering HTML ...", flush=True)
         task.set_rendering()
         result = render_bilingual_html(
             marked_html=marked_html,
@@ -402,13 +396,13 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             embed_images=embed_images,
             resource_dir=resource_dir,
         )
-        print(f"  {tag}        {len(result):,} bytes", flush=True)
+        print(f"         {len(result):,} bytes", flush=True)
 
         # Clear interrupted flag (we successfully completed this run)
         task.interrupted = False
         task.set_done()
         _active_tasks.pop(arxiv_id, None)
-        print(f"  {tag} ✅ Done", flush=True)
+        print(f"  ✅ Done", flush=True)
         return result
 
     def _respond_html(self, html: str):
