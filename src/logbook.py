@@ -115,6 +115,10 @@ def set_progress(phase: str | None = None, pct: float | None = None,
 
     这是替代「每次进度都 print 一行」的接口：调它只刷新面板，所以并行时
     不会刷屏，日志文件也不会被进度条灌满。
+
+    **进入新阶段时会清掉上一阶段的 pct 与 note**——否则上一个阶段跑到
+    100% 之后，那个 100% 会一直挂在面板上，看起来像新阶段已经完成。
+    需要在新阶段里保留进度条就显式传 pct。
     """
     aid = current_task()
     if not aid:
@@ -124,7 +128,13 @@ def set_progress(phase: str | None = None, pct: float | None = None,
         if st is None:
             return
         if phase is not None:
+            new_phase = phase != st.get("phase")
             st["phase"] = phase
+            if new_phase:
+                # 新阶段：除非本次显式给了值，否则清掉旧进度
+                st["pct"] = None if pct is None else max(0.0, min(100.0, float(pct)))
+                st["note"] = "" if note is None else note
+                return
         if pct is not None:
             st["pct"] = max(0.0, min(100.0, float(pct)))
         if note is not None:

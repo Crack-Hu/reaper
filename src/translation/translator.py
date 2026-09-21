@@ -291,6 +291,14 @@ def _translate_one_section(args):
         with progress_counter["lock"]:
             progress_counter["done"] += len(result)
             cum_done = progress_counter["done"]
+            cb = progress_counter.get("on_progress")
+            total_all = progress_counter.get("total") or 0
+        # 在锁外回调（避免用户回调反手取锁造成死锁），异常不能影响翻译
+        if cb is not None and total_all:
+            try:
+                cb(cum_done, total_all)
+            except Exception:
+                pass
     pct = f"{cum_done/progress_counter['total']*100:.0f}%" if progress_counter and progress_counter['total'] else ""
     # Done: pct right-aligned in 4 chars, then task ID, so ( aligns across all lines
     if cum_done > 0:
@@ -298,7 +306,7 @@ def _translate_one_section(args):
     return sec_idx, result, terms
 
 
-def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None, cache=None):
+def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None, cache=None, on_progress=None):
     SKIP_TYPES = {"figure", "table", "equation"}
     print(f"      Grouping sections ...", flush=True)
     abstract_text, sections = group_blocks_by_section(blocks)
@@ -363,7 +371,8 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
     total_work = len(work_items)
 
     # Step 3: convert batches to full work_item tuples
-    progress_counter = {"done": cache_hits, "total": cache_hits + uncached, "lock": threading.Lock()}
+    progress_counter = {"done": cache_hits, "total": cache_hits + uncached,
+                        "lock": threading.Lock(), "on_progress": on_progress}
     full_items = []
     for wi, batch in enumerate(work_items):
         total_new += len(batch)
@@ -483,7 +492,8 @@ def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base
 
 
 def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
-                     batch_size=0, paper_id="", executor=None, cache=None):
+                     batch_size=0, paper_id="", executor=None, cache=None,
+                     on_progress=None):
     """Translate parsed blocks.
 
     batch_size > 0: legacy fixed-size batch mode.
@@ -521,7 +531,8 @@ def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
                                   api_key, base_url, model, batch_size, paper_id, cache_hits, cache=cache)
         else:
             _translate_by_sections(blocks, results, paper_title, term_dict,
-                                   api_key, base_url, model, paper_id, cache_hits, executor, cache=cache)
+                                   api_key, base_url, model, paper_id, cache_hits, executor,
+                                   cache=cache, on_progress=on_progress)
     except Exception as e:
         print(f"  ✗ translate_blocks FAILED: {e}", flush=True)
         raise

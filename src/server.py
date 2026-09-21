@@ -358,7 +358,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 task._save()
 
             # Step 3: Translate
-            logbook.set_progress(phase="[3/4] 翻译中")
+            # 起始百分比 = 缓存命中比例；翻译过程中由 on_progress 实时更新
+            _pre_total = len(paper_cache) or 1
+            _pre_done = getattr(paper_cache, "translated_count", 0)
+            logbook.set_progress(phase="[3/4] 翻译中",
+                                 pct=_pre_done / _pre_total * 100,
+                                 note=f"{_pre_done}/{_pre_total}")
             print(f"  [3/4] Translating ...", flush=True)
             task.set_translating()
 
@@ -372,6 +377,10 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                 base_url=config.LLM_BASE_URL,
                 executor=get_translation_pool(),
                 cache=paper_cache,
+                # 实时进度：已翻段落 / 可翻译段落数（不含标题，所以分母
+                # 会比 task.progress 的「全部块」略小，标签里说清楚）
+                on_progress=lambda d, t: logbook.set_progress(
+                    pct=d / t * 100, note=f"段落 {d}/{t}"),
             )
 
             # Update task progress from results
