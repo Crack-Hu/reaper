@@ -99,6 +99,9 @@ class PiBridge:
         self._responses: dict[str, dict] = {}
         self._req_lock = threading.Lock()
         self._req_seq = 0
+        # 串行化 stdin 写入。pi 的协议是「一行一个 JSON」，而管道的写入只保证
+        # 小于 PIPE_BUF 的原子性 —— 并发的长 prompt 会交错并损坏协议。
+        self._write_lock = threading.Lock()
 
         self._stderr: list[str] = []
         self.last_active = time.monotonic()
@@ -330,8 +333,12 @@ class PiBridge:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.poll() is not None:
             raise PiBridgeError("pi is not running")
-        proc.stdin.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8"))
-        proc.stdin.flush()
+        line = (json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8")
+        # 整个「写入 + flush」必须是一段临界区，否则两个线程的字节会交错，
+        # pi 会读到半条 JSON。
+        with self._write_lock:
+            proc.stdin.write(line)
+            proc.stdin.flush()
         self.last_active = time.monotonic()
 
     def _request(self, cmd: dict, timeout: float = REQUEST_TIMEOUT) -> dict:
