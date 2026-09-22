@@ -156,17 +156,19 @@ def _block_render() -> list[str]:
     out = []
     for aid, st in items:
         phase = (st.get("phase") or "…")[:26]
-        note = (st.get("note") or "")[:14]
+        note = (st.get("note") or "")[:16]
         pct = st.get("pct")
-        # 列是条件性的：用不到的列不占位（面板每次都会先擦再画，
-        # 所以宽度变化不会留下残影）。
-        parts = [f"  {aid:<{width}}", f"{phase:<26}"]
+        # 只有一个进度槽：note 与百分比表达的是同一件事，同时显示就是冗余。
+        # 分数（如 187/323）比裸百分比信息更多，所以优先用它。
         if note:
-            parts.append(f"{note:<14}")
-        if pct is not None:
-            filled = int(pct / 10)
-            parts.append("█" * filled + "░" * (10 - filled))
-            parts.append(f"{pct:>3.0f}%")
+            progress = note
+        elif pct is not None:
+            progress = f"{pct:.0f}%"
+        else:
+            progress = ""
+        parts = [f"  {aid:<{width}}", f"{phase:<26}"]
+        if progress:
+            parts.append(f"{progress:>16}")
         parts.append(f"{now - st['started']:>5.0f}s")
         out.append(" ".join(parts))
     return out
