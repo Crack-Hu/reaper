@@ -37,6 +37,17 @@ LLM_API_KEY = api_cfg.get("key", "")
 LLM_BASE_URL = api_cfg.get("base_url", "https://api.deepseek.com/v1")
 LLM_MODEL = api_cfg.get("model", "deepseek-chat")
 
+# 单次请求的输出上限。**推理模型的推理 token 也算在这里面**，所以不能给得太小：
+# 翻译一个长小节时，推理能轻易吃掉几千 token，正文就没预算了（表现为
+# content: null + finish_reason: length）。
+LLM_MAX_TOKENS = int(api_cfg.get("max_tokens", 16384))
+
+# 原样合并进 /chat/completions 请求体的额外参数，用于传厂商特定开关。
+# 典型用途：关掉推理模型的思考过程（翻译是机械任务，推理纯浪费）：
+#   "params": {"reasoning_effort": "none"}
+# 若端点不认这些参数（返回 400），代码会自动去掉它们重试一次。
+LLM_PARAMS = dict(api_cfg.get("params", {}))
+
 SERVER_HOST = srv_cfg.get("host", "0.0.0.0")
 SERVER_PORT = int(srv_cfg.get("port", 16625))
 
