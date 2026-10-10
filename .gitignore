@@ -33,11 +33,14 @@ zotero-plugin/_repack/
 # ── Config with secrets ──
 config.json
 
-# ── Tests ──
-tests/
-
 # ── Reference materials ──
-docs/
-materials/
+# docs/ (研究调研) 与 materials/ (Zotero 插件资料) 已纳入版本管理。
 ref_repo/
 *.zip
+
+# ── Scratch / downloaded reference pages ──
+old.html
+t.html
+openalex.md
+parse.rst
+pyb.py

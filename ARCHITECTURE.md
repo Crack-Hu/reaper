@@ -1,246 +1,215 @@
-# Reaper — 科研文章双语阅读工具
+# Reaper — 架构参考
 
-## 概述
+> 本文描述**当前代码**的架构。交接状态与下一步见 `HANDOFF.md`；
+> 各模块实现细节见对应目录的 `README.md`。
 
-Reaper 将 arxiv 论文自动转换为**中英对照的可读 HTML**，作为附件存入 Zotero。用户在 Zotero 中管理论文，双击即可在浏览器中阅读双语版本，原文公式、图表、表格完整保留。
+## 1. 系统边界
 
-核心流程：下载 ar5iv HTML → 解析段落 → LLM 按章节翻译 → 渲染双语 HTML → 导入 Zotero。
-
-## 架构
-
-```
-Zotero 插件 (bootstrap.js)
-       │  HTTP API
-       ▼
-Reaper Server (src/server.py)
-       │
-       ├── src/ingestion/    获取 + 解析
-       │   ├── fetcher.py    下载 ar5iv HTML
-       │   └── parser.py     提取段落，数学公式占位
-       │
-       ├── src/translation/  翻译引擎
-       │   ├── translator.py 按章节 + 并发
-       │   ├── dictionary.py 术语表（用户 + LLM 自动）
-       │   └── cache.py      SHA256 去重
-       │
-       └── src/rendering/    输出
-           └── renderer.py   拼接双语 HTML + CSS
-```
-
-## 目录结构
+Reaper 由三个可独立运行的部分组成：
 
 ```
-reaper/
-├── config.json                    # 用户配置
-├── main.py                        # CLI 入口
-├── src/                           # 服务端代码
-│   ├── server.py                  # HTTP 后端
-│   ├── cli.py                     # 命令行工具
-│   ├── config.py                  # 配置加载
-│   ├── task.py                    # 任务状态管理
-│   ├── ingestion/
-│   ├── translation/
-│   └── rendering/
-├── zotero-plugin/                 # Zotero 插件
-│   ├── bootstrap.js               # 入口逻辑
-│   ├── manifest.json              # 元数据
-│   ├── prefs.js                   # 默认设置
-│   ├── setup.sh                   # 构建安装脚本
-│   └── content/preferences.xhtml  # 设置页面
-└── data/                          # 运行时产物（gitignore）
-    ├── ar5iv/{id}.html            # ar5iv 原始 HTML 缓存
-    ├── zotero/{id}.html           # 双语 HTML（本地副本）
-    ├── translation_cache/{id}.json
-    ├── tasks/{id}.json            # 任务状态
-    ├── dict/                      # 术语字典
-    └── logs/server.log
+┌────────────────────┐      ┌─────────────────────┐      ┌──────────────────┐
+│ Zotero 插件 (JS)    │ HTTP │ Reaper 服务器 (Python)│ stdio│ pi agent (外部)   │
+│ 菜单 / 面板 / 附件   │─────▶│ 生成流水线 + chat 桥  │─────▶│ LLM + 工具 + 会话  │
+└────────────────────┘      └─────────────────────┘ JSONL└──────────────────┘
+                                      │
+                                      ▼
+                            data/papers/{arxiv_id}/
 ```
 
-## Server API
+- **插件**：只发 HTTP，不 spawn 子进程；负责 Zotero 集成与 UI（对话面板规划中）。
+- **服务器**：唯一有状态的中枢。论文流水线、缓存、pi 进程生命周期、SSE 广播都在这里。
+- **pi**：被服务器拉起的子进程。**不实现任何 LLM / 工具 / 会话逻辑**，全部委托给 pi。
 
-### `GET /api/generate?arxiv_id=<ID>`
+## 2. 分层与模块
 
-执行完整流水线（下载 → 解析 → 翻译 → 渲染），返回完整双语 HTML。
+| 层 | 模块 | 职责 |
+|---|---|---|
+| 入口 | `main.py` / `src/cli.py` | CLI 单篇处理 |
+| 入口 | `src/server.py` | HTTP 后端、生成流水线、chat API 挂载 |
+| 基础设施 | `src/config.py` | 配置读取 + **所有数据路径的唯一来源** |
+| 基础设施 | `src/task.py` | 任务状态机（pending→fetching→parsing→translating→rendering→done） |
+| 基础设施 | `src/logbook.py` | 并发任务日志（终端面板 + 每论文日志文件） |
+| 处理 | `src/ingestion/` | 获取（多来源）+ 解析（`Block` 序列） |
+| 处理 | `src/translation/` | 翻译引擎 + 双层术语表 + 缓存 |
+| 处理 | `src/rendering/` | 双语 HTML 渲染 + UI 注入 |
+| 对话 | `src/chat/` | 论文上下文 + pi 桥 + 会话注册表 + HTTP/SSE API |
+| 扩展 | `zotero-plugin/` | Zotero 插件 |
+| 扩展 | `pi-extensions/` | 补 pi RPC 缺失命令（`/goto`、`/label`、`/where`） |
+| 测试 | `tests/` | 单元 + 集成测试（fetch/render 类按旧 API 写，见 `tests/README.md`） |
 
-- 首次请求：完整流程（下载 ~15s + 翻译 ~2-5min）
-- 重复请求：秒级返回（ar5iv 缓存 + 翻译缓存全部命中）
-- 通过 Task 状态文件支持中断恢复
-
-### `GET /api/clear?arxiv_id=<ID>`
-
-清除指定论文的所有缓存（ar5iv HTML、翻译缓存、任务状态、输出 HTML）。用于强制重新生成。术语词典不受影响。
-
-### `GET /api/terms` / `POST /api/terms`
-
-读写用户术语词典。
-
-### `GET /papers/{id}`
-
-Web 预览——返回注入完整 UI（工具栏、术语面板）的双语页面。
-
-## Zotero 插件
-
-### 右键菜单
-
-**条目右键 → Reaper → Download from Arxiv**：自动检测 arxiv ID，弹窗确认后下载 PDF 并附加到条目。
-
-**条目右键 → Reaper → Generate Bilingual HTML**：调用 Server API 生成双语 HTML，作为子附件存入 Zotero。
-
-- 已有附件时弹出确认对话框，可选择清除缓存后重新生成
-- 条目无 arxiv ID 时弹窗允许手动输入
-
-### 设置页面
-
-路径：Zotero → 偏好设置 → Reaper
-
-- **Attachment Name**：附件命名模板，`{arxiv_id}` 为占位符，默认 `"Reaper: {arxiv_id}"`
-- **Server Port**：后端端口，默认 `16625`
-
-### arxiv ID 自动检测
-
-插件在条目的以下字段中查找 arxiv ID，保留版本后缀（`v2`/`v3`）：
-
-1. URL — `arxiv.org/abs/1907.11157v2`
-2. Extra — `arxiv: 1907.11157v2`
-3. DOI — `10.48550/arxiv.1907.11157v2`
-
-### 安装
-
-```bash
-cd zotero-plugin && bash setup.sh
-# 重启 Zotero
-```
-
-## 翻译流水线
-
-### 1. 获取原始 HTML
+## 3. 论文生成流水线
 
 ```
-输入: arxiv ID 或 URL
- → 构造 ar5iv URL: https://ar5iv.labs.arxiv.org/html/{id}
- → 下载 HTML → 缓存至 data/ar5iv/{id}.html
- → 下次请求直接读缓存
+GET /api/generate?arxiv_id=X[&source=...&embed_images=0]
+        │
+        ▼
+fetch_html(X)                        src/ingestion/fetcher.py
+  ├─ sources 优先级（config.SOURCES）: arxiv_html → ar5iv → ar5ivist_docker
+  ├─ 缓存：{source_dir(X)}/X.html + 同目录图片；命中即返回
+  └─ 失败逐个降级；全部失败抛 RuntimeError(聚合原因)
+        │ raw HTML
+        ▼
+mark_and_extract(html)               src/ingestion/parser.py
+  └─ 一次遍历：插入 data-reaper-id="N" + 抽出 blocks[N]
+     Block{type, level, text, math_map, label}
+     math → MATH_N 占位；脚注 → FN_N（脚注内容单独成 note block）
+        │ marked_html + blocks
+        ▼
+translate_blocks(blocks, cache=PaperCache)  src/translation/translator.py
+  ├─ 命中 PaperCache（HTML hash 一致）→ 跳过解析+翻译
+  ├─ 按 section 分组，每节一次 LLM 调用，全局线程池并发
+  ├─ prompt 标注 REAPER_PARA_N，按编号对齐译文
+  └─ 术语表（user > llm）注入 prompt；LLM 新术语回写
+        │ blocks_with_zh
+        ▼
+render_bilingual_html(marked_html, blocks_with_zh, fp)  src/rendering/renderer.py
+  ├─ 7 步注入：来源清洗 → ar5iv CSS 内嵌 → 资源处理 → TOC → 页脚
+  │            → 译文 → 元数据/来源开关 JS
+  └─ 输出 data/papers/X/process/reaper_html/index.html(+assets/)
 ```
 
-**异常**：
-- ar5iv 无此论文（重定向到 arxiv.org）→ `Ar5ivError`：论文太新，ar5iv 尚未转换
-- ar5iv 转换失败（`ltx_ERROR`）→ `Ar5ivError`：LaTeXML 转换异常
+### 关键设计决策
 
-### 2. 解析段落
+1. **保留 ar5iv 原生 CSS**：公式/表格/图注由 LaTeXML 渲染，自写 CSS 无法覆盖全部边缘情况；只做增量覆盖。
+2. **按章节翻译**：LLM 看到完整章节上下文；超长节在段落边界平衡拆分。
+3. **编号对齐**：`REAPER_PARA_N` 按编号匹配，LLM 少输出/合并输出也不错位。
+4. **PaperCache v2**：一个文件同时存 HTML hash、blocks、译文，`merge_translations` 后立即落盘；
+   崩溃不会留下「0 翻译」的缓存。
+5. **画布包裹**：所有来源正文都在 `<div class="reaper-content">` 内，TOC/工具栏在画布外。
+6. **三来源统一**：都产自 LaTeXML，类名体系一致；arxiv_html 保留原生 TOC 只改锚点，其余由 blocks 生成 TOC。
 
-```
-ar5iv HTML → 一次遍历匹配 h1(title) / hN(section) / p(para) / figcaption
-          → 插入 data-reaper-id="N" 标记
-          → 提取纯文本 + <math> 替换为 MATH_N 占位符
-          → 返回 marked_html（带标记的 HTML） + blocks[]（段落数组）
-```
+## 4. 对话架构（`src/chat/`）
 
-每个 Block 包含 `type`（title/section/para）、`level`（标题层级）、`text`（纯文本）、`math_map`（占位符 → 原始公式映射）。
-
-### 3. 翻译
-
-**整体策略**：按章节分组，每节一次 LLM 调用，多节并发翻译。
+**铁律：pi 是引擎，Reaper 只是通信与 UI。** 不自建 LLM 循环、会话存储、压缩逻辑。
 
 ```
-blocks[] → 按章节标题分组 sections[]
-         → 超过 10000 字符的节以段落边界平衡拆分
-         → 提交到全局线程池（并发数由 config.translator.concurrency 控制）
-         → 每节 prompt 包含：论文标题 + 摘要 + 术语词典 + 所有段落
-         → LLM 返回 REAPER_PARA_N 编号的译文
+插件 / prototype 页
+   │  POST /api/chat            → 立即返回 {accepted}
+   │  GET  /api/chat/stream     → SSE，常驻订阅（事件广播）
+   ▼
+src/chat/api.py           HTTP 表面 + 回环限制 + busy 守卫
+   │
+   ├─ context.py           论文 workspace：paper.md / blocks.json / OUTLINE.md / metadata.json
+   ├─ session.py           每论文一个 PiBridge；懒加载 + 空闲回收；会话列表/解析/删除
+   └─ bridge.py            spawn `pi --mode rpc`，单读取线程解析 JSONL → 订阅者队列
+                              │
+                              ▼
+                        pi 进程（每论文一个）
+                          cwd        = chat/workspace
+                          tools      = read,grep,find,ls（只读白名单）
+                          session-dir= chat/sessions
+                          --session <path>（存在才传）
+                          --append-system-prompt OUTLINE.md
+                          --extension pi-extensions/reaper-tree.ts
 ```
 
-**段落对齐**：提示词中每段标注 `REAPER_PARA_1`、`REAPER_PARA_2`……LLM 返回相同编号的译文。按编号匹配，不依赖数量一致。
+### 4.1 上下文策略
 
-**术语管理**：双层结构——用户手动定义（`dict/user_terms.json`，高优先级）+ LLM 翻译时自动提取（`dict/llm_terms.json`，低优先级）。合并后注入 prompt，用户定义覆盖 LLM 建议。
+完整 `paper.md`（带 `<!-- block:N -->` 锚点、公式还原为 `$...$`）放工作目录，
+agent 用 `read`/`grep` 按需查；system prompt 只放**字节稳定**的 `OUTLINE.md`（无时间戳，
+可命中 provider 的 prompt cache）。宏展开是字符串替换（`expand_macros.py`），不做
+MathML→LaTeX 语义转换。
 
-**翻译缓存**：`SHA256(英文段落) → 中文翻译`，按论文 ID 分文件存储。再次请求同一段落时秒级命中，无需重复翻译。
+### 4.2 传输协议要点
 
-**进度显示**：终端输出累计进度百分比，包含缓存命中数。
+| 环节 | 协议 | 关键约束 |
+|---|---|---|
+| 插件 ↔ 服务器 | HTTP + SSE | 不要用 `EventSource`（读不了自定义重连/中断）；不能用 `Zotero.HTTP.request`（XHR 无法流式） |
+| 服务器 ↔ pi | stdio JSONL | 只按 `\n` 分帧；单 stdout 读取者；stdin 写入加锁；`accepted` ≠ 完成 |
 
-### 4. 渲染
+### 4.3 会话模型
 
-```
-marked_html + 翻译结果
- → 在 data-reaper-id="N" 标记处插入对应中文翻译
- → CSS 覆盖：引用字体修正、摘要标题字号统一、页面宽度限制
- → 保留 ar5iv 原生 CSS（公式/表格/图注渲染）
- → 输出保存至 data/zotero/{id}.html
-```
+- **每篇论文一个 pi 进程**（不是每标签页、不是全局单进程）：上下文隔离，崩溃只影响自身；启动 < 1s，懒加载成本可忽略。
+- 会话文件由 pi 写在 `chat/sessions/*.jsonl`；**它同时就是对话历史**，UI 的会话列表直接扫目录。
+- 恢复用显式 `--session <path>`（可打开任意历史会话），不用 `--continue`。
+- 切换/删除会话：`respawn` 迁移订阅者；删除优先系统废纸篓，且不允许删除正在使用的会话（先切走再删）。
+- 树操作（navigate/label）走 `pi-extensions/reaper-tree.ts`：pi RPC 没有 `navigate_tree`，
+  但扩展命令可通过 `prompt` 调用（已实测）。运行中一律拒绝（pi issue #5096）。
 
-## 配置
+## 5. HTTP API 总表
 
-`config.json`（项目根目录）：
+| 方法 | 路径 | 说明 | 实现 |
+|---|---|---|---|
+| GET | `/api/generate?arxiv_id=` | 全流水线生成，返回 JSON（HTML 走 `/api/zotero_html/`） | `server.py` |
+| GET | `/api/clear?arxiv_id=` | 清理该论文缓存（不动词典） | `server.py` |
+| GET/POST | `/api/terms` | 读/写用户术语表 | `server.py` |
+| GET | `/api/zotero_html/{id}` | 返回生成的双语 HTML | `server.py` |
+| GET | `/` | 已生成论文列表 | `server.py` |
+| GET/DELETE | `/api/stop` | 保存状态并退出 | `server.py` |
+| POST | `/api/chat` | 发消息（立即返回 accepted） | `chat/api.py` |
+| GET | `/api/chat/stream` | SSE 事件流（常驻） | `chat/api.py` |
+| POST | `/api/chat/abort` | 中断当前 turn | `chat/api.py` |
+| POST | `/api/chat/prepare` | 构建 agent workspace | `chat/api.py` |
+| POST | `/api/chat/reset` | 在当前进程内新建会话 | `chat/api.py` |
+| GET | `/api/chat/health` | 进程/连接状态 | `chat/api.py` |
+| GET | `/api/chat/sessions` | 会话列表（含 current） | `chat/api.py` |
+| GET | `/api/chat/messages` | 当前会话消息（来自 pi，权威） | `chat/api.py` |
+| GET | `/api/chat/tree` | 会话树 + stats + 可分叉点 | `chat/api.py` |
+| GET | `/api/chat/commands` | 扩展/模板/skill 命令 | `chat/api.py` |
+| POST | `/api/chat/open` | 切换到指定会话 | `chat/api.py` |
+| POST | `/api/chat/new` | 新建会话（fresh） | `chat/api.py` |
+| POST | `/api/chat/rename` | 重命名会话 | `chat/api.py` |
+| POST | `/api/chat/fork` | 从历史消息分叉 | `chat/api.py` |
+| POST | `/api/chat/clone` | 复制当前分支 | `chat/api.py` |
+| POST | `/api/chat/delete` | 删除会话（废纸篓优先） | `chat/api.py` |
+| POST | `/api/chat/export` | 导出会话 HTML | `chat/api.py` |
+| POST | `/api/chat/navigate` | 移动活跃分支（扩展 `/goto`） | `chat/api.py` |
+| POST | `/api/chat/label` | 设置/清除节点标签（扩展） | `chat/api.py` |
+| GET | `/api/chat/prototype` | 测试页（同源，无 CORS） | `chat/api.py` |
+
+安全：`/api/chat/*` 默认仅回环（agent 可读文件），`chat.allow_remote: true` 才放开。
+
+## 6. 配置
+
+`config.json`（被 gitignore；模板 `config.json.example`）：
 
 ```json
 {
-  "api": {
-    "key": "sk-xxx",
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat"
-  },
-  "server": {
-    "host": "0.0.0.0",
-    "port": 16625
-  },
-  "translator": {
-    "concurrency": 3
-  }
+  "api":      {"key": "...", "base_url": "...", "model": "...",
+               "max_tokens": 16384, "params": {"reasoning_effort": "none"}},
+  "server":   {"host": "0.0.0.0", "port": 16625},
+  "translator": {"concurrency": 3},
+  "sources":  [{"type": "arxiv_html"}, {"type": "ar5iv"}, {"type": "ar5ivist_docker"}],
+  "ar5ivist_docker_image": "latexml/ar5ivist:2512.17",
+  "chat":     {"idle_timeout": 900, "tools": "read,grep,find,ls",
+               "pi_bin": "pi", "allow_remote": false,
+               "model": null, "thinking": null}
 }
 ```
 
-`translator.concurrency` 控制**全局**翻译线程池大小。所有论文共享此池，同时最多 N 个 LLM 请求。过大可能触发 API 限流。
+- `api.max_tokens` 必须覆盖推理 token（推理模型的 reasoning 也算在内）。
+- `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
+- `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
+- `chat.extensions` 不写时自动加载 `pi-extensions/reaper-tree.ts`（绝对路径）；
+  手动配置时**必须是绝对路径**（pi 的 cwd 是 workspace，相对路径会失效）。
+- `translator.concurrency` 是**全局**翻译线程池大小，所有论文共享。
 
-## 启动
+## 7. 数据模型
 
-```bash
-# 后端服务（常驻）
-python3 src/server.py
+| 数据 | 位置 | 生产者 → 消费者 |
+|---|---|---|
+| 原始 HTML + 图片 | `papers/{id}/source/` | fetcher → parser/renderer/context |
+| PaperCache v2 | `papers/{id}/process/translation_cache/cache.json` | translator ↔ server |
+| Task 状态 | `papers/{id}/process/state.json` | task.py ↔ server |
+| 双语 HTML | `papers/{id}/process/reaper_html/` | renderer → Zotero 插件 |
+| agent workspace | `papers/{id}/chat/workspace/` | context.py → pi |
+| pi 会话 | `papers/{id}/chat/sessions/*.jsonl` | pi（唯一写者）→ session.py（只读索引） |
+| 术语表 | `dict/user_terms.json` + `dict/llm_terms.json` | dictionary.py（读-合并-写 + 原子替换） |
+| 日志 | `logs/server.log` + `logs/papers/{id}.log` | logbook.py |
 
-# 命令行（一次性处理单篇论文）
-python3 main.py 1907.11157
+## 8. 并发模型
 
-# Zotero 插件
-bash zotero-plugin/setup.sh
-```
+- 服务器：`ThreadingHTTPServer`；翻译用全局 `ThreadPoolExecutor(max_workers=translator.concurrency)`。
+- 生成去重：`_inflight` 集合，同论文并发请求返回 202「正在处理中」。
+- 术语表：跨实例共享锁 + 落盘前 read-merge-write + 原子替换（跨进程仍是「合并后覆盖」）。
+- PaperCache / Task：各自带锁，变更即落盘。
+- chat：`PiSessionRegistry` 一把 RLock 管进程表；每 bridge 一个 reader 线程 + 一个 stderr 线程；
+  空闲回收线程每 60s 扫描一次（`idle_timeout` 默认 900s，有订阅者不回收）。
 
-## 任务状态
+## 9. 非目标（明确不做）
 
-每个论文一个 `data/tasks/{id}.json`：
-
-```json
-{
-  "arxiv_id": "1907.11157v2",
-  "state": "translating",
-  "blocks": [
-    {"idx": 0, "hash": "a3f8c92d", "done": true},
-    {"idx": 1, "hash": "b7e2c441", "done": false}
-  ],
-  "total": 183,
-  "translated": 105,
-  "error": null,
-  "interrupted": false
-}
-```
-
-**状态机**：`pending → fetching → parsing → translating → rendering → done`
-
-**中断恢复**：加载时检测 state 是否为中间状态 → 标记 `interrupted = true` → 未完成的 block 继续翻译。
-
-**错误追踪**：每次异常记录到 `error_history`，保留最近 10 条。
-
-## 设计要点
-
-1. **保留 ar5iv 原生 CSS**：公式、表格、图注由 LaTeXML 渲染，自写 CSS 无法覆盖所有边缘情况
-2. **按章节翻译**：LLM 看到完整章节上下文，翻译更连贯
-3. **编号对齐**：`REAPER_PARA_N` 按编号匹配，LLM 少输出或合并输出时也不会错位
-4. **平衡章节拆分**：在段落边界处按最接近目标大小的方式切分，避免极端不均匀
-5. **双层术语表**：用户定义优先，LLM 翻译时自动积累新术语，逐步丰富
-6. **全局线程池**：各任务共享翻译并发配额，由配置文件控制上限
-7. **版本 ID 区分**：`1907.11157v2` 和 `1907.11157v3` 独立缓存，ar5iv 上它们是不同页面
-
-## 已知限制
-
-- ar5iv 不覆盖所有 arxiv 论文，较新的论文或特殊 LaTeX 格式可能无法转换
-- 翻译质量依赖 LLM，术语词典可弥补部分一致性；无 API key 时仅使用缓存
-- 并发翻译数受 API 限流约束，建议 ≤ 5
-- 生成的 HTML 附件约 3MB，首次请求需等待完整翻译和下载
+- 不自建 LLM 调用/工具循环/会话存储/上下文压缩（pi 负责）。
+- 不统一模型或 provider 配置（pi 负责）。
+- 不实现多窗口/多客户端同步同一会话（等 pi 的多客户端能力）。
+- 不做 PDF 解析（非 arXiv 来源是未来阶段）。

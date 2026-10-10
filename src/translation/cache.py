@@ -3,7 +3,7 @@
 Stores the full pipeline state so that when the HTML hasn't changed,
 both parsing AND translation can be skipped entirely.
 
-File: data/translation_cache/{arxiv_id}.json
+File: config.translation_cache_dir(arxiv_id)/cache.json
 
 Structure:
 {
@@ -34,7 +34,8 @@ import threading
 from pathlib import Path
 from .. import config
 
-CACHE_DIR = Path(config.CACHE_DIR)
+# PaperCache stores at `config.translation_cache_dir(arxiv_id) / "cache.json"`.
+# PaperCache now stores under `config.translation_cache_dir(arxiv_id) / "cache.json"`.
 
 
 def _hash(text: str) -> str:
@@ -61,7 +62,7 @@ class PaperCache:
 
     def __init__(self, arxiv_id: str):
         self.arxiv_id = arxiv_id
-        self._path = CACHE_DIR / f"{arxiv_id}.json"
+        self._path = Path(config.translation_cache_dir(arxiv_id)) / "cache.json"
         self.version = 2
         self.html_hash: str = ""
         self.src_type: str = ""
@@ -76,7 +77,7 @@ class PaperCache:
     def load(cls, arxiv_id: str) -> "PaperCache":
         """Load existing cache or return empty one."""
         cache = cls(arxiv_id)
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache._path.parent.mkdir(parents=True, exist_ok=True)
         if cache._path.exists():
             try:
                 cache._read()

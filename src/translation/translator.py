@@ -77,45 +77,111 @@ def build_section_prompt(heading, paragraphs, paper_title, abstract_text, term_d
     return "\n".join(parts)
 
 
+def _extract_content(body: dict, max_tokens: int):
+    """从响应里取正文。取不到时返回 (None, 可操作的解释)。
+
+    推理模型的响应里 `content` 可能是 null，而 `reasoning` 里塞着被截断的
+    思考过程 —— 那是因为推理 token 也计入 max_tokens，budget 被吃光了。
+    这种情况必须明确报出来，否则只会看到「空内容」然后盲目重试。
+    """
+    choice = (body.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    content = msg.get("content")
+    if content and content.strip():
+        return content.strip(), None
+
+    finish = choice.get("finish_reason")
+    usage = body.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = details.get("reasoning_tokens")
+    has_reasoning = bool(msg.get("reasoning") or msg.get("reasoning_content"))
+
+    if finish == "length":
+        if has_reasoning or reasoning_tokens:
+            n = reasoning_tokens if reasoning_tokens is not None else "若干"
+            return None, (
+                f"输出被 max_tokens({max_tokens}) 截断：{n} 个 token 花在推理上，"
+                f'正文没写完。建议在 config.json 的 api 节加 '
+                f'"params": {{"reasoning_effort": "none"}} 关掉推理，或调大 max_tokens。'
+            )
+        return None, (f"输出被 max_tokens({max_tokens}) 截断，正文未产出。"
+                      f"建议调大 config.json 的 api.max_tokens。")
+
+    if finish == "content_filter":
+        return None, "内容被安全过滤拦截。"
+
+    return None, (f"模型返回空正文（finish_reason={finish!r}, "
+                  f"completion_tokens={usage.get('completion_tokens')}）。")
+
+
 def call_llm_api(system_prompt, user_prompt, api_key="", base_url="", model="", temperature=0.1):
+    """调用 OpenAI 兼容的 /chat/completions。
+
+    与旧实现的区别：
+    * max_tokens 来自配置（推理模型的推理 token 也算在里面，写死小值会饿死正文）
+    * config 的 api.params 原样并入请求体（例如 reasoning_effort=none 关推理）
+    * 端点若拒绝这些额外参数（400），自动去掉它们重试一次
+    * 因 max_tokens 截断时翻倍预算再试，而不是拿同样的参数盲重试
+    """
     key = api_key or config.LLM_API_KEY
     url = base_url or config.LLM_BASE_URL
     model_name = model or config.LLM_MODEL
     if not key:
         raise RuntimeError("No API key configured. Set key in config.json.")
 
-    import time
-    max_retries = 2
-    for attempt in range(max_retries + 1):
+    endpoint = f"{url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+    max_tokens = config.LLM_MAX_TOKENS
+    params = dict(config.LLM_PARAMS)
+    attempts = 0
+    limit = 4                 # 总量上限，避免多类重试叠加成死循环
+    bumped = False
+    dropped = False
+
+    while attempts < limit:
+        attempts += 1
+        payload = {
+            "model": model_name,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_prompt}],
+        }
+        payload.update(params)
+
         try:
-            resp = httpx.post(
-                f"{url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": model_name, "temperature": temperature, "max_tokens": 4096,
-                       "messages": [{"role": "system", "content": system_prompt},
-                                     {"role": "user", "content": user_prompt}]},
-                timeout=300,
-            )
+            resp = httpx.post(endpoint, headers=headers, json=payload, timeout=300)
+
+            if resp.status_code == 400 and params and not dropped:
+                dropped = True
+                print(f"      ⚠ 端点拒绝额外参数 {sorted(params)}，去掉它们重试", flush=True)
+                params = {}
+                continue
+
             resp.raise_for_status()
-            text = resp.text.strip()
-            try:
-                body = json.loads(text)
-                content = body["choices"][0]["message"]["content"]
-                if content is None or not content.strip():
-                    print(f"      ⚠ API returned empty content", flush=True)
-                    print(f"      raw (first 500): {text[:500]}", flush=True)
-                    raise ValueError("API returned empty content")
-                return content.strip()
-            except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
-                print(f"      ⚠ API response parse error: {e}", flush=True)
-                print(f"      raw (first 500): {text[:500]}", flush=True)
-                raise
-        except Exception as e:
-            if attempt < max_retries:
-                print(f"      ⚠ API call failed (attempt {attempt+1}/{max_retries+1}): {e}", flush=True)
+            body = resp.json()
+        except (httpx.HTTPError, json.JSONDecodeError) as e:
+            if attempts < limit:
+                print(f"      ⚠ API 调用失败（第 {attempts} 次）：{e}", flush=True)
                 print(f"      retrying ...", flush=True)
-            else:
-                raise
+                continue
+            raise
+
+        content, why = _extract_content(body, max_tokens)
+        if content:
+            return content
+
+        print(f"      ⚠ {why}", flush=True)
+        if "截断" in why and not bumped:
+            bumped = True
+            max_tokens = min(max_tokens * 2, 65536)
+            print(f"      → 把 max_tokens 提到 {max_tokens} 再试一次", flush=True)
+            continue
+        print(f"      raw (first 400): {json.dumps(body, ensure_ascii=False)[:400]}", flush=True)
+        raise ValueError(why)
+
+    raise RuntimeError("LLM 调用重试次数耗尽")
 
 
 def group_blocks_by_section(blocks):
@@ -291,6 +357,14 @@ def _translate_one_section(args):
         with progress_counter["lock"]:
             progress_counter["done"] += len(result)
             cum_done = progress_counter["done"]
+            cb = progress_counter.get("on_progress")
+            total_all = progress_counter.get("total") or 0
+        # 在锁外回调（避免用户回调反手取锁造成死锁），异常不能影响翻译
+        if cb is not None and total_all:
+            try:
+                cb(cum_done, total_all)
+            except Exception:
+                pass
     pct = f"{cum_done/progress_counter['total']*100:.0f}%" if progress_counter and progress_counter['total'] else ""
     # Done: pct right-aligned in 4 chars, then task ID, so ( aligns across all lines
     if cum_done > 0:
@@ -298,7 +372,7 @@ def _translate_one_section(args):
     return sec_idx, result, terms
 
 
-def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None, cache=None):
+def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, base_url, model, paper_id, cache_hits, executor=None, cache=None, on_progress=None):
     SKIP_TYPES = {"figure", "table", "equation"}
     print(f"      Grouping sections ...", flush=True)
     abstract_text, sections = group_blocks_by_section(blocks)
@@ -363,7 +437,8 @@ def _translate_by_sections(blocks, results, paper_title, term_dict, api_key, bas
     total_work = len(work_items)
 
     # Step 3: convert batches to full work_item tuples
-    progress_counter = {"done": cache_hits, "total": cache_hits + uncached, "lock": threading.Lock()}
+    progress_counter = {"done": cache_hits, "total": cache_hits + uncached,
+                        "lock": threading.Lock(), "on_progress": on_progress}
     full_items = []
     for wi, batch in enumerate(work_items):
         total_new += len(batch)
@@ -483,7 +558,8 @@ def _translate_in_batches(blocks, results, paper_title, term_dict, api_key, base
 
 
 def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
-                     batch_size=0, paper_id="", executor=None, cache=None):
+                     batch_size=0, paper_id="", executor=None, cache=None,
+                     on_progress=None):
     """Translate parsed blocks.
 
     batch_size > 0: legacy fixed-size batch mode.
@@ -521,7 +597,8 @@ def translate_blocks(blocks, term_dict=None, api_key="", base_url="", model="",
                                   api_key, base_url, model, batch_size, paper_id, cache_hits, cache=cache)
         else:
             _translate_by_sections(blocks, results, paper_title, term_dict,
-                                   api_key, base_url, model, paper_id, cache_hits, executor, cache=cache)
+                                   api_key, base_url, model, paper_id, cache_hits, executor,
+                                   cache=cache, on_progress=on_progress)
     except Exception as e:
         print(f"  ✗ translate_blocks FAILED: {e}", flush=True)
         raise

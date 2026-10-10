@@ -104,9 +104,19 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
   // ──── actions ──────────────────────
 
   async function downloadFromArxivAction() {
-    var zp = Zotero.getActiveZoteroPane(), collection;
+    var zp = Zotero.getActiveZoteroPane();
     if (!zp) return;
-    if (zp.getSelectedCollection) collection = zp.getSelectedCollection();
+
+    // Zotero 10: multiple collection selection — the singular
+    // getSelectedCollection() exists but throws. Use the plural getter
+    // when available and fall back for Zotero 8/9.
+    var collections = [];
+    if (zp.getSelectedCollections) {
+      collections = zp.getSelectedCollections() || [];
+    } else if (zp.getSelectedCollection) {
+      var c = zp.getSelectedCollection();
+      if (c) collections = [c];
+    }
 
     var selected = zp.getSelectedItems ? zp.getSelectedItems() : [];
 
@@ -129,7 +139,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
         await attachPDF(selected[i], id);
       }
     } else {
-      await importFromArxiv(arxivID, collection);
+      await importFromArxiv(arxivID, collections);
     }
   }
 
@@ -159,7 +169,7 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
 
   // ──── arxiv & PDF ──────────────────
 
-  async function importFromArxiv(arxivID, collection) {
+  async function importFromArxiv(arxivID, collections) {
     log("Importing " + arxivID);
     flash("Reaper", "Importing " + arxivID + " ...");
 
@@ -168,7 +178,15 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       translate.setHandler("itemDone", async function(obj, item) {
         try {
           await item.saveTx();
-          if (collection) { collection.addItem(item.id); await collection.saveTx(); }
+          // Zotero 10: add to all selected collections (plural API)
+          if (collections && collections.length) {
+            for (var j = 0; j < collections.length; j++) {
+              var collection = collections[j];
+              if (!collection) continue;
+              collection.addItem(item.id);
+              await collection.saveTx();
+            }
+          }
           log("Imported: " + item.getField("title"));
         } catch (e) { log("import err: " + e); }
       });
@@ -274,6 +292,17 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var resp = await fetch(fetchURL);
       log("fetch status: " + resp.status);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
+
+      // 服务器不会为同一篇论文同时跑两次生成。202 表示已有一个请求在处理，
+      // 这次不再重复跑整条流水线（也避免双倍的 LLM 花费）。
+      if (resp.headers.get("X-Reaper-Status") === "processing") {
+        var waitMsg = arxivID + " 正在处理中，请等待完成";
+        if (pw) { pw.addDescription(waitMsg); pw.startCloseTimer(8000); }
+        else { flash("Reaper", waitMsg); }
+        log(waitMsg);
+        return;
+      }
+
       var outputDir = resp.headers.get("X-Output-Dir");
       log("output dir: " + outputDir);
       // For light mode (no outputDir), fetch the HTML from the serving endpoint
@@ -382,6 +411,13 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
       var fetchURL = serverURL() + "/api/generate?arxiv_id=" + arxivID;
       var resp = await fetch(fetchURL);
       if (!resp.ok) throw new Error("Server returned " + resp.status);
+
+      // 已在处理中：不要在此重复跑一遍（会双倍 LLM 花费）
+      if (resp.headers.get("X-Reaper-Status") === "processing") {
+        flash("Reaper", arxivID + " 正在处理中，请等待完成");
+        return;
+      }
+
       var outputDir = resp.headers.get("X-Output-Dir");
 
       // Fetch the generated HTML for the light-mode fallback
@@ -440,7 +476,11 @@ var { install, onMainWindowLoad, onMainWindowUnload, shutdown, startup, uninstal
   }
 
   async function readClipboard(w) {
-    try { var t = await navigator.clipboard.readText(); if (t) return extractArxivID(t) || t.trim().substring(0, 200); } catch (e) {}
+    try {
+      // bootstrap scope has no `navigator` — use the window's
+      var t = await w.navigator.clipboard.readText();
+      if (t) return extractArxivID(t) || t.trim().substring(0, 200);
+    } catch (e) {}
     return "";
   }
 

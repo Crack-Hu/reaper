@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reaper Chat</title>
+<!--
+  Phase 0 spike front-end. Validates the whole chain:
+
+      browser --HTTP/SSE--> Reaper server --stdio/JSONL--> pi
+
+  Two things this page deliberately does the way the real Zotero panel will:
+
+  1. ONE persistent SSE subscription per page (not one per message). Several
+     panels can be open on the same paper and every one sees every turn.
+  2. fetch() + getReader() to read the stream — never EventSource, and never
+     Zotero.HTTP.request (XHR-based, cannot stream).
+
+  The conversation lives in pi, not here: this page asks the server for the
+  session list and the message history, and renders whatever comes back.
+-->
+<style>
+  :root{
+    --bg:#fff; --pane:#f7f7f8; --fg:#1a1a1a; --muted:#6b7280; --border:#e3e3e6;
+    --accent:#2563eb; --fill:#f1f1f3; --think:#8b5cf6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#1c1c1e; --pane:#232326; --fg:#e8e8ea; --muted:#9b9ba1;
+           --border:#3a3a3e; --accent:#5b9cf8; --fill:#2c2c30; --think:#a78bfa; }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--fg);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:flex;flex-direction:column}
+
+  header{display:flex;align-items:center;gap:8px;padding:7px 12px;
+    border-bottom:1px solid var(--border);background:var(--pane);flex:0 0 auto}
+  header h1{font-size:13px;font-weight:600;margin:0;white-space:nowrap}
+  #dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+  #dot.on{background:#22c55e} #dot.err{background:#ef4444} #dot.busy{background:#f59e0b}
+  /* A bare coloured dot communicates nothing, so the state is also written out
+     whenever it is not the healthy default. */
+  #dotlbl{font-size:11px;color:var(--muted);flex:0 0 auto;white-space:nowrap}
+  header select,header button{font-size:12px;padding:3px 7px;border-radius:5px;
+    border:1px solid var(--border);background:var(--bg);color:var(--fg);max-width:100%}
+  header button{cursor:pointer;background:var(--fill)}
+  #grow{flex:1 1 auto;min-width:0}
+
+  /* session picker: a panel rather than a native <select>, because each row
+     needs its own rename/delete affordances (and pi refuses to delete the
+     session it currently has open, so a single "delete selected" button could
+     almost never be used). */
+  #sesspanel{flex:0 0 auto;display:none;max-height:44vh;overflow:auto;
+    background:var(--pane);border-bottom:1px solid var(--border);font-size:12px}
+  #sesspanel .srow{display:flex;gap:8px;align-items:baseline;padding:5px 12px;
+    border-bottom:1px solid var(--border);cursor:pointer}
+  #sesspanel .srow:last-child{border-bottom:0}
+  #sesspanel .srow:hover{background:var(--fill)}
+  #sesspanel .srow.cur{background:var(--fill)}
+  #sesspanel .srow .t{flex:1 1 auto;min-width:0;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+  #sesspanel .srow.cur .t{color:var(--fg);font-weight:600}
+  #sesspanel .srow .m{flex:0 0 auto;color:var(--muted);font-size:11px}
+  #sesspanel .srow button{flex:0 0 auto;border:1px solid var(--border);
+    background:var(--bg);color:var(--muted);border-radius:4px;font-size:11px;
+    padding:0 5px;cursor:pointer}
+  #sesspanel .srow button:hover{color:var(--fg)}
+  #sesspanel .srow .now{flex:0 0 auto;color:var(--accent);font-size:10px}
+  #sesspanel .sempty{color:var(--muted);font-style:italic;padding:8px 12px}
+  #sess{flex:1 1 auto;min-width:0;max-width:420px}
+  details.cfg{font-size:11px;color:var(--muted)}
+  details.cfg summary{cursor:pointer}
+  details.cfg input{font-size:11px;padding:2px 5px;border:1px solid var(--border);
+    border-radius:4px;background:var(--bg);color:var(--fg)}
+  header button.icon{padding:3px 7px;line-height:1}
+
+  /* thin status strip: the TUI's /session summary */
+  #stats{flex:0 0 auto;display:none;gap:12px;padding:4px 12px;font-size:11px;
+    color:var(--muted);background:var(--pane);border-bottom:1px solid var(--border);
+    overflow-x:auto;white-space:nowrap}
+  #stats b{color:var(--fg);font-weight:600}
+  #stats .bar{display:inline-block;width:54px;height:5px;border-radius:3px;
+    background:var(--fill);vertical-align:middle;overflow:hidden}
+  #stats .bar i{display:block;height:100%;background:var(--accent)}
+
+  /* session tree (the TUI's /tree) */
+  #treebar{flex:0 0 auto;display:none;max-height:46vh;overflow:auto;
+    background:var(--pane);border-bottom:1px solid var(--border);font-size:12px}
+  #treehead{position:sticky;top:0;z-index:1;display:flex;gap:12px;align-items:center;
+    flex-wrap:wrap;padding:6px 12px;background:var(--pane);
+    border-bottom:1px solid var(--border);font-size:11px;color:var(--muted)}
+  #treehead label{display:flex;gap:4px;align-items:center;cursor:pointer}
+  #treebody{padding:5px 12px 10px}
+  .trow{display:flex;gap:5px;align-items:baseline;padding:1px 3px;border-radius:3px;
+    cursor:pointer}
+  .trow:hover{background:var(--fill)}
+  /* Connector glyphs copied from the TUI: ├─ ├─ └─ │ and blank continuation.
+     A linear chain gets no glyphs at all — lines appear only at real branches. */
+  .trow .guide{flex:0 0 auto;white-space:pre;font-family:ui-monospace,Menlo,monospace;
+    font-size:11px;color:var(--border)}
+  .trow.onpath .guide{color:var(--muted)}
+  .trow.here .guide{color:var(--accent)}
+  .trow .who{flex:0 0 auto;opacity:.75}
+  .trow .txt{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;color:var(--muted)}
+  .trow.here .txt{color:var(--fg);font-weight:600}
+  .trow.onpath .txt{color:var(--fg)}
+  .trow button{flex:0 0 auto;border:1px solid var(--border);background:var(--bg);
+    color:var(--muted);border-radius:4px;font-size:10px;padding:0 5px;cursor:pointer;
+    visibility:hidden}
+  .trow:hover button{visibility:visible}
+  .trow button:hover{color:var(--fg)}
+  .tlabel{font-size:10px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:999px;padding:0 5px;flex:0 0 auto}
+  .tfork{font-size:10px;color:var(--accent);flex:0 0 auto}
+  .tempty{color:var(--muted);font-style:italic;padding:6px 12px}
+
+  /* composer command hints */
+  #cmds{position:absolute;bottom:100%;left:14px;right:14px;margin-bottom:4px;
+    background:var(--pane);border:1px solid var(--border);border-radius:7px;
+    box-shadow:0 4px 14px rgba(0,0,0,.14);max-height:230px;overflow:auto;display:none;z-index:20}
+  #cmds .c{display:flex;gap:8px;padding:5px 10px;cursor:pointer;font-size:12px}
+  #cmds .c:hover,#cmds .c.sel{background:var(--fill)}
+  #cmds .c code{font-family:ui-monospace,Menlo,monospace;color:var(--accent);
+    flex:0 0 auto;min-width:88px}
+  #cmds .c span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #cmds .hdr{position:sticky;top:0;background:var(--pane);padding:5px 10px;
+    font-size:10px;color:var(--muted);border-bottom:1px solid var(--border)}
+  footer{position:relative}
+
+  #messages{flex:1 1 auto;overflow-y:auto;padding:14px;display:flex;
+    flex-direction:column;gap:10px}
+  #empty{color:var(--muted);text-align:center;margin:auto;max-width:340px}
+  #empty b{color:var(--fg)}
+  .hint{margin-top:14px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+  .hint button{font-size:12px;padding:4px 9px;border-radius:999px;cursor:pointer;
+    border:1px solid var(--border);background:var(--fill);color:var(--fg)}
+
+  .msg{max-width:100%}
+  .msg.user{align-self:flex-start;background:var(--fill);border-radius:8px;
+    padding:7px 11px;white-space:pre-wrap;word-break:break-word}
+  .msg.err{border-left:3px solid #ef4444;padding:7px 11px;background:var(--fill);
+    font-size:13px;white-space:pre-wrap;border-radius:4px}
+  .msg.sys{color:var(--muted);font-size:12px;font-style:italic}
+
+  details.tool{margin:5px 0;font-size:12px;color:var(--muted);
+    border-left:2px solid var(--border);padding-left:8px}
+  details.tool summary{cursor:pointer;list-style:none;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  details.tool summary::-webkit-details-marker{display:none}
+  details.tool summary::before{content:"▸ "}
+  details.tool[open] summary::before{content:"▾ "}
+  details.tool pre{margin:5px 0 0;padding:7px;background:var(--fill);border-radius:4px;
+    overflow:auto;font-size:11px;max-height:240px;color:var(--fg);
+    white-space:pre-wrap;word-break:break-word}
+
+  /* Thinking is a first-class block, not noise: give it its own colour and
+     always keep a readable preview in the summary so it is discoverable. */
+  details.think{border-left-color:var(--think)}
+  details.think summary{color:var(--think);font-style:italic}
+  details.think pre{font-family:inherit;font-size:12px;color:var(--fg);opacity:.85}
+
+  .body h1,.body h2,.body h3{font-size:1.02em;margin:9px 0 4px}
+  .body p{margin:6px 0}
+  .body ul{margin:5px 0;padding-left:19px}
+  .body code{background:var(--fill);padding:1px 4px;border-radius:3px;
+    font:.9em ui-monospace,Menlo,monospace}
+  .body pre.code{background:var(--fill);padding:8px;border-radius:5px;overflow-x:auto;
+    font:12px ui-monospace,Menlo,monospace;margin:6px 0}
+  .math{font-family:"Latin Modern Math",Cambria,Georgia,serif;font-style:italic;
+    background:var(--fill);padding:1px 4px;border-radius:3px;white-space:nowrap}
+  .math.block{display:block;text-align:center;padding:6px;margin:6px 0;
+    white-space:normal;font-style:normal}
+  .caret{opacity:.5}
+
+  #chip{display:none;margin:0 14px 8px;padding:7px 10px;border-radius:6px;
+    background:var(--fill);border-left:3px solid var(--accent);font-size:12px}
+  #chip .loc{color:var(--muted);font-size:11px;display:block;margin-bottom:2px}
+  #chip button{float:right;border:0;background:none;color:var(--muted);
+    cursor:pointer;font-size:14px}
+
+  footer{flex:0 0 auto;border-top:1px solid var(--border);background:var(--pane);
+    padding:9px 14px 12px;display:flex;gap:8px;align-items:flex-end}
+  #input{flex:1;resize:none;min-height:34px;max-height:170px;padding:8px 10px;
+    border:1px solid var(--border);border-radius:7px;background:var(--bg);
+    color:var(--fg);font:inherit;overflow-y:auto}
+  #input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+  footer button{min-width:34px;height:34px;border-radius:7px;cursor:pointer;
+    border:1px solid var(--border);background:var(--fill);color:var(--fg)}
+  footer button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  footer button:disabled{opacity:.45;cursor:default}
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot"></span>
+  <span id="dotlbl"></span>
+  <h1>Reaper</h1>
+  <button id="sessbtn" title="会话列表">会话 ▾</button>
+  <button id="new" class="icon" title="开始新会话">＋</button>
+  <button id="tree" class="icon" title="会话树（/tree）">🌿</button>
+  <span id="grow"></span>
+  <details class="cfg"><summary>设置</summary>
+    <div style="padding:5px 0;display:flex;gap:6px;align-items:center">
+      server <input id="srv" value="http://127.0.0.1:16625" style="width:170px">
+      paper  <input id="paper" value="2210.00921" style="width:105px">
+      <button id="reload">重载</button>
+    </div>
+  </details>
+</header>
+
+<!-- session picker -->
+<div id="sesspanel"></div>
+
+<!-- /session equivalent: context window, tokens, cost -->
+<div id="stats"></div>
+
+<!-- /tree equivalent: branches, labels, fork points -->
+<div id="treebar"></div>
+
+<div id="messages">
+  <div id="empty">
+    <b>问这篇论文任何问题</b>
+    <p>agent 读的是它的 LaTeX 源码，回答会给出处。</p>
+    <div class="hint">
+      <button>List of Symbols 里 X、Z 分别代表什么？</button>
+      <button>这篇综述把方法分成哪几大类？</button>
+      <button>零噪声外推的基本假设是什么？</button>
+    </div>
+  </div>
+</div>
+
+<div id="chip">
+  <button onclick="clearChip()">×</button>
+  <span class="loc" id="chipLoc"></span>
+  <span id="chipText"></span>
+</div>
+
+<footer>
+  <div id="cmds"></div>
+  <textarea id="input" rows="1" placeholder="问点什么…  (/ 看命令，Enter 发送，Shift+Enter 换行，Esc 中断)"></textarea>
+  <button id="stop" title="中断">■</button>
+  <button id="send" class="primary" title="发送">↑</button>
+</footer>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const box = $("messages");
+
+let chip = null;
+let streamAbort = null;
+let streamUp = false;
+let running = false;          // a turn is in flight (possibly started elsewhere)
+let run = null;               // the assistant bubble for the current turn
+let sending = false;
+const pendingUserText = new Set();   // our own messages, so history does not double-render
+
+const base = () => $("srv").value.trim().replace(/\/$/, "");
+const paper = () => $("paper").value.trim();
+
+/* ------------------------------------------------------------------ *
+ * markdown + minimal math
+ * ------------------------------------------------------------------ */
+
+const esc = (s) => s.replace(/[&<>"]/g,
+  c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+const GREEK = {alpha:"α",beta:"β",gamma:"γ",delta:"δ",epsilon:"ε",zeta:"ζ",eta:"η",
+  theta:"θ",iota:"ι",kappa:"κ",lambda:"λ",mu:"μ",nu:"ν",xi:"ξ",pi:"π",rho:"ρ",
+  sigma:"σ",tau:"τ",phi:"φ",chi:"χ",psi:"ψ",omega:"ω",Gamma:"Γ",Delta:"Δ",
+  Theta:"Θ",Lambda:"Λ",Xi:"Ξ",Pi:"Π",Sigma:"Σ",Phi:"Φ",Psi:"Ψ",Omega:"Ω"};
+
+// Prototype-only typesetting. KaTeX replaces this in the real panel.
+function renderMath(tex){
+  let s = esc(tex);
+  s = s.replace(/\\(left|right|big|Big|bigl|bigr)\s*/g, "");
+  s = s.replace(/\\(?:operatorname|mathrm|text)\{([^{}]*)\}/g, "$1");
+  s = s.replace(/\\(hat|bar|vec|tilde|dot)\s*\{([^{}]*)\}/g,
+    (_,a,b) => b + ({hat:"^",bar:"‾",vec:"→",tilde:"~",dot:"˙"}[a] || ""));
+  s = s.replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, "($1)/($2)");
+  s = s.replace(/\\sqrt\{([^{}]*)\}/g, "√($1)");
+  s = s.replace(/\\([A-Za-z]+)/g, (m,n) => GREEK[n] || n);
+  s = s.replace(/[{}]/g, "");
+  s = s.replace(/_\{([^{}]*)\}/g, "<sub>$1</sub>").replace(/_(\w)/g, "<sub>$1</sub>");
+  s = s.replace(/\^\{([^{}]*)\}/g, "<sup>$1</sup>").replace(/\^(\w)/g, "<sup>$1</sup>");
+  return `<span class="math">${s}</span>`;
+}
+
+function renderMarkdown(src){
+  const hold = [];
+  let t = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_,l,c) => {
+    hold.push(`<pre class="code">${esc(c.replace(/\n$/,""))}</pre>`);
+    return `\u0000${hold.length-1}\u0000`;
+  });
+  t = t.replace(/\$\$([\s\S]*?)\$\$/g, (_,m) => {
+    hold.push(renderMath(m.trim()).replace('class="math"','class="math block"'));
+    return `\u0000${hold.length-1}\u0000`;
+  });
+  t = esc(t);
+  t = t.replace(/\$([^$\n]+)\$/g, (_,m) => renderMath(m));
+  t = t.replace(/`([^`\n]+)`/g, (_,c) => `<code>${c}</code>`);
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
+       .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
+       .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>");
+  t = t.replace(/^\s*[-*]\s+(.+)$/gm, "<li>$1</li>")
+       .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>");
+  t = t.split(/\n{2,}/).map(p => /^\s*<(h\d|ul|pre|div)/.test(p)
+      ? p : `<p>${p.replace(/\n/g,"<br>")}</p>`).join("");
+  return t.replace(/\u0000(\d+)\u0000/g, (_,i) => hold[+i]);
+}
+
+/* ------------------------------------------------------------------ *
+ * DOM helpers
+ * ------------------------------------------------------------------ */
+
+const atBottom = () => box.scrollHeight - box.scrollTop - box.clientHeight < 70;
+function scroll(force){ if (force || atBottom()) box.scrollTop = box.scrollHeight; }
+function clearEmpty(){ const e = $("empty"); if (e) e.remove(); }
+function el(tag, cls, html){
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html != null) e.innerHTML = html;
+  return e;
+}
+
+function addUser(text){
+  clearEmpty();
+  box.appendChild(el("div","msg user", esc(text)));
+  scroll(true);
+}
+function addSystem(text){
+  clearEmpty();
+  box.appendChild(el("div","msg sys", esc(text)));
+  scroll(true);
+}
+function addError(text){
+  clearEmpty();
+  box.appendChild(el("div","msg err", esc(text)));
+  scroll(true);
+}
+
+/** Create (or reuse) the assistant bubble for the current turn. */
+function ensureRun(){
+  if (run) return run;
+  clearEmpty();
+  const wrap = el("div","msg assistant");
+  const think = el("details","tool think");
+  think.innerHTML = '<summary></summary><pre></pre>';
+  const body = el("div","body");
+  wrap.appendChild(think);        // created but hidden until thinking arrives
+  wrap.appendChild(body);
+  think.style.display = "none";
+  box.appendChild(wrap);
+  scroll(true);
+  run = { wrap, think, body, raw: "", thinkRaw: "", tools: new Map(),
+          sawThinking: false, errored: false, dirty: false, lastPaint: 0 };
+  return run;
+}
+
+/** Throttled repaint: re-rendering markdown on every token is O(n²). */
+function paint(r, force){
+  const now = performance.now();
+  if (!force && now - r.lastPaint < 120) { r.dirty = true; return; }
+  r.lastPaint = now; r.dirty = false;
+  r.body.innerHTML = renderMarkdown(r.raw) +
+    (running ? '<span class="caret">▍</span>' : "");
+  scroll();
+}
+
+function showThinking(r, delta){
+  r.sawThinking = true;
+  r.thinkRaw += delta;
+  r.think.style.display = "";
+  const pre = r.think.querySelector("pre");
+  pre.appendChild(document.createTextNode(delta));    // O(1), not textContent +=
+  const preview = r.thinkRaw.replace(/\s+/g," ").slice(0, 64);
+  r.think.querySelector("summary").textContent = "思考：" + preview + (r.thinkRaw.length > 64 ? "…" : "");
+  scroll();
+}
+
+function reportModelError(r, m){
+  if (r.errored) return;
+  r.errored = true;
+  const where = [m.provider, m.model].filter(Boolean).join("/");
+  addError(`模型调用失败${where ? `（${where}）` : ""}：${m.errorMessage || "未知错误"}`);
+}
+
+/* ------------------------------------------------------------------ *
+ * rendering a message from pi's own history
+ * ------------------------------------------------------------------ */
+
+function renderHistoryMessage(m){
+  if (!m || !m.content) return;
+  const blocks = Array.isArray(m.content) ? m.content
+    : [{ type: "text", text: String(m.content) }];
+
+  if (m.role === "user"){
+    const text = blocks.filter(c => c.type === "text").map(c => c.text).join("");
+    if (!text) return;
+    if (pendingUserText.has(text)){ pendingUserText.delete(text); return; }  // ours
+    addUser(text);
+    return;
+  }
+
+  if (m.role === "assistant"){
+    const wrap = el("div","msg assistant");
+    // Attach the answer body FIRST: it is the insertion anchor for the thinking
+    // block and the tool details, and insertBefore() throws if the reference
+    // node is not already a child.
+    const body = el("div","body");
+    wrap.appendChild(body);
+
+    // Thinking always precedes the rest of an assistant message, so attach it
+    // before the content loop — that keeps history identical to the live view.
+    const think = el("details","tool think");
+    think.innerHTML = '<summary></summary><pre></pre>';
+    wrap.insertBefore(think, body);
+
+    let thinkText = "", answer = "", made = false;
+
+    for (const c of blocks){
+      if (c.type === "thinking"){
+        thinkText += (c.thinking || "");
+      } else if (c.type === "text"){
+        answer += (c.text || "");
+      } else if (c.type === "toolCall"){
+        const d = el("details","tool");
+        d.innerHTML = `<summary>⏺ ${esc(c.name || "tool")} ` +
+          `<span style="opacity:.7">${esc(JSON.stringify(c.arguments||{}).slice(0,90))}</span></summary>` +
+          `<pre>${esc(String(c.id || ""))}</pre>`;
+        wrap.insertBefore(d, body);          // above the answer, as in the live view
+      }
+    }
+    if (thinkText){
+      think.querySelector("summary").textContent = "思考：" + thinkText.replace(/\s+/g," ").slice(0,64) + "…";
+      think.querySelector("pre").textContent = thinkText;
+      made = true;
+    } else {
+      think.remove();
+    }
+    if (answer){
+      body.innerHTML = renderMarkdown(answer);
+      made = true;
+    } else {
+      body.remove();                          // do not leave an empty bubble
+    }
+    if (m.stopReason === "error"){
+      wrap.appendChild(el("div","msg err", esc(`模型调用失败（${m.provider||""}/${m.model||""}）：${m.errorMessage||"未知错误"}`)));
+      made = true;
+    }
+    if (!made) return;
+    clearEmpty();
+    box.appendChild(wrap);
+  }
+  // toolResult messages are shown inside their tool-call details in the live
+  // stream; in history they add little, so they are skipped on purpose.
+}
+
+async function loadHistory(){
+  box.innerHTML = "";
+  const r = await fetch(`${base()}/api/chat/messages?arxiv_id=${encodeURIComponent(paper())}`);
+  const j = await r.json();
+  const msgs = j.messages || [];
+  if (!msgs.length){
+    box.appendChild(el("div","",'<div id="empty"><b>还没有对话</b><p>问点什么试试。</p></div>'));
+    wireHints();
+    return;
+  }
+  for (const m of msgs){
+    try { renderHistoryMessage(m); }
+    catch (e){ addError(`有一条历史消息渲染失败：${e}`); }   // one bad message must
+  }                                                        // not kill the list
+  scroll(true);
+}
+
+/* ------------------------------------------------------------------ *
+ * session list
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * session picker
+ *
+ * A panel, not a native <select>: each row needs its own rename/delete, and a
+ * single "delete the selected conversation" button barely works because the
+ * selected one is normally the active one — which pi will not let us unlink.
+ * ------------------------------------------------------------------ */
+
+let sessList = [];
+let sessCurrent = null;      // what pi actually has open (not "newest file")
+let sessFresh = false;       // a brand-new conversation, not yet persisted
+let sessOpen = false;
+
+function toggleSessions(){
+  sessOpen = !sessOpen;
+  $("sesspanel").style.display = sessOpen ? "block" : "none";
+  // Always re-read when opening: the current conversation may have changed
+  // behind our back (a turn landed, or another panel switched it).
+  if (sessOpen) loadSessions();
+}
+
+function closeSessions(){ sessOpen = false; $("sesspanel").style.display = "none"; }
+
+async function loadSessions(){
+  try {
+    const r = await fetch(`${base()}/api/chat/sessions?arxiv_id=${encodeURIComponent(paper())}`);
+    const j = await r.json();
+    sessList = j.sessions || [];
+    sessCurrent = j.current || null;
+    sessFresh = !!j.fresh;
+  } catch (_){ /* the picker is optional */ }
+  renderSessions();
+}
+
+function renderSessions(){
+  // Never show a bare "会话": there is always something more specific to say.
+  const active = sessList.find(s => s.path === sessCurrent);
+  let label, tip;
+  if (sessFresh){
+    label = "（新会话）";
+    tip = "新会话（首次回答后才会保存到列表）";
+  } else if (active){
+    label = active.title;
+    tip = `${active.title}（${active.messages} 条 · ${(active.created||"").slice(0,16).replace("T"," ")}）`;
+  } else if (sessList.length){
+    label = sessList[0].title;          // defensive: fall back to the newest
+    tip = `${label}（${sessList[0].messages} 条）`;
+  } else {
+    label = "（无会话）";
+    tip = "还没有任何会话，点 ＋ 开始一个";
+  }
+  $("sessbtn").textContent = (label.length > 18 ? label.slice(0,18) + "…" : label) + " ▾";
+  $("sessbtn").title = tip;
+
+  if (!sessOpen) return;
+  const panel = $("sesspanel");
+  panel.innerHTML = "";
+
+  // A fresh conversation has no file yet, so show it as a synthetic first row —
+  // otherwise the list would still mark the previous one as current.
+  if (sessFresh){
+    const row = el("div", "srow cur");
+    row.appendChild(el("span", "now", "●"));
+    row.appendChild(el("span", "t", "（新会话 · 尚未保存）"));
+    row.appendChild(el("span", "m", "首次回答后出现在列表里"));
+    row.title = "当前正在使用的新会话";
+    panel.appendChild(row);
+  }
+
+  if (!sessList.length && !sessFresh){
+    panel.appendChild(el("div", "sempty", "还没有会话。"));
+    return;
+  }
+
+  for (const s of sessList){
+    const isCurrent = !sessFresh && s.path === sessCurrent;
+    const row = el("div", "srow" + (isCurrent ? " cur" : ""));
+    row.title = s.path;
+
+    if (isCurrent){
+      const now = el("span", "now", "●");
+      now.title = "当前正在使用的会话";
+      row.appendChild(now);
+    }
+    row.appendChild(el("span", "t", esc(s.title)));
+    row.appendChild(el("span", "m",
+      `${s.messages} 条 · ${(s.created || "").slice(5,16).replace("T", " ")}`));
+
+    const rn = el("button", null, "✎");
+    rn.title = "重命名";
+    rn.onclick = (ev) => { ev.stopPropagation(); renameSessionById(s, isCurrent); };
+    row.appendChild(rn);
+
+    const dl = el("button", null, "🗑");
+    dl.title = "删除（先移到系统废纸篓）";
+    dl.onclick = (ev) => { ev.stopPropagation(); deleteSessionById(s, isCurrent); };
+    row.appendChild(dl);
+
+    row.onclick = () => openSessionById(s, isCurrent);
+    panel.appendChild(row);
+  }
+}
+
+async function openSessionById(s, isCurrent){
+  closeSessions();
+  if (isCurrent) return;
+  await openSession(s.id);
+}
+
+/** pi can only rename the session it currently has open. */
+async function renameSessionById(s, isCurrent){
+  if (!isCurrent){
+    if (!confirm(`pi 只能给自己的当前会话改名。\n\n要打开「${s.title}」再改名吗？`)) return;
+    await openSession(s.id);
+    await loadSessions();
+  }
+  const v = prompt("会话名称（留空则清除）", s.name || "");
+  if (v === null) return;
+  try {
+    const j = await (await fetch(`${base()}/api/chat/rename`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper(), name: v }),
+    })).json();
+    if (!j.ok){ addError(j.error || "重命名失败"); return; }
+    await loadSessions();
+  } catch (e){ addError(`重命名失败：${e}`); }
+}
+
+async function deleteSessionById(s, isCurrent, permanent){
+  if (!permanent){
+    const extra = isCurrent
+      ? "\n\n这是当前正在使用的会话，删除后会切到另一个会话。"
+      : "";
+    if (!confirm(`删除这个会话？\n\n${s.title}（${s.messages} 条）${extra}\n\n` +
+                 `（先移到系统废纸篓，可在那里找回）`)) return;
+  } else if (!confirm(`永久删除「${s.title}」？\n\n此操作不可恢复。`)) return;
+
+  try {
+    const body = { arxiv_id: paper(), session: s.id };
+    if (permanent) body.permanent = true;
+    const j = await (await fetch(`${base()}/api/chat/delete`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    })).json();
+
+    if (!j.ok){
+      // Never let "delete" quietly become an unrecoverable erase.
+      if (j.trash_failed){
+        if (confirm(`无法移入废纸篓：\n${j.error}\n\n` +
+                    `要改为永久删除吗？（不可恢复）`)){
+          return deleteSessionById(s, isCurrent, true);
+        }
+        return;
+      }
+      addError(j.error || "删除失败");
+      return;
+    }
+
+    addSystem((j.trashed ? "已移到废纸篓" : "已永久删除") +
+              (j.switched ? "，并已切换到另一个会话。" : "。"));
+    await loadSessions();
+    if (j.switched){
+      run = null; running = false;
+      await loadHistory(); refreshStats();
+      if (treeOpen) loadTree();
+    }
+  } catch (e){ addError(`删除失败：${e}`); }
+}
+
+/* Command-line entry points (kept so /rename and /delete still work). */
+
+function currentSession(){
+  // A fresh conversation has no list entry; callers must not silently fall back
+  // to some unrelated session.
+  if (sessFresh) return null;
+  return sessList.find(s => s.path === sessCurrent) || sessList[0] || null;
+}
+
+async function renameSession(){
+  await loadSessions();
+  // A fresh session is renameable even though it is not in the list yet — pi
+  // just needs a name; the file appears with the first answer.
+  const s = sessFresh
+    ? { title: "（新会话）", name: "", messages: 0 }
+    : currentSession();
+  if (!s){ addError("没有可重命名的会话。"); return; }
+  await renameSessionById(s, true);
+}
+
+async function deleteSession(){
+  toggleSessions();
+  if (sessOpen) addSystem("在会话列表里点 🗑 删除（可删任意会话，包括当前的）。");
+}
+
+/* ------------------------------------------------------------------ *
+ * session tree + stats  (the /tree and /session equivalents)
+ * ------------------------------------------------------------------ */
+
+let treeOpen = false;
+let treeData = null;
+let hideTools = true;      // tool results dominate a long session; hide by default
+
+/**
+ * Flatten the session tree into display rows, with TUI-style connector glyphs.
+ *
+ * Two rules, and getting the second one wrong is what made this look broken:
+ *
+ *  1. A *branch child* (its parent has more than one child) gets a connector —
+ *     `├─ `, or `└─ ` when it is last — and opens a new level.
+ *  2. A *linear child* (its parent has exactly one child) is a continuation of
+ *     the same conversation line. It gets NO connector and does NOT open a new
+ *     level, so a question and its answer sit at the same indentation.
+ *
+ * A pure linear chain therefore renders completely flush left, and lines only
+ * appear where the tree really branches.
+ */
+function flattenTree(roots){
+  const out = [];
+  const walk = (nodes, cols, withConn) => {
+    nodes.forEach((n, i) => {
+      const isLast = i === nodes.length - 1;
+      const kids = n.children || [];
+      const conn = withConn ? (isLast ? "└─ " : "├─ ") : "";
+      out.push({ node: n, isLast, forks: kids.length, guide: cols + conn });
+      if (!kids.length) return;
+      // Children indent only when this node actually branches. Otherwise they
+      // inherit the current columns and continue the same line.
+      const branched = kids.length > 1;
+      const childCols = cols + (conn ? (isLast ? "   " : "│  ") : "");
+      walk(kids, childCols, branched);
+    });
+  };
+  walk(roots, "", false);
+  return out;
+}
+
+function toggleTree(){
+  treeOpen = !treeOpen;
+  $("treebar").style.display = treeOpen ? "block" : "none";
+  if (treeOpen) loadTree();
+}
+
+async function fetchTree(){
+  const r = await fetch(`${base()}/api/chat/tree?arxiv_id=${encodeURIComponent(paper())}`);
+  treeData = await r.json();
+  return treeData;
+}
+
+/** Stats are useful without the tree, so fetch them on boot and after turns. */
+async function refreshStats(){
+  try { renderStats((await fetchTree()).stats); }
+  catch (_){ $("stats").style.display = "none"; }
+}
+
+async function loadTree(){
+  const bar = $("treebar");
+  if (!treeOpen) return;
+  try {
+    const j = await fetchTree();
+    renderStats(j.stats);
+    if (!j.running){ bar.innerHTML = '<div class="tempty">没有运行中的会话</div>'; return; }
+    const roots = j.tree || [];
+    if (!roots.length){ bar.innerHTML = '<div class="tempty">会话还是空的</div>'; return; }
+
+    // Mark the path root -> leaf so the active branch is obvious.
+    const onPath = new Set();
+    (function mark(nodes){
+      for (const n of nodes){
+        if (n.entry && n.entry.id === j.leafId){ onPath.add(n.entry.id); return true; }
+        if (mark(n.children || [])){ onPath.add(n.entry.id); return true; }
+      }
+      return false;
+    })(roots);
+
+    const rows = flattenTree(roots);
+    const shown = rows.filter(r =>
+      !hideTools || r.node.entry?.type !== "message" ||
+      r.node.entry.message?.role !== "toolResult");
+
+    bar.innerHTML = "";
+    const head = document.createElement("div");
+    head.id = "treehead";
+    const cb = el("label", null,
+      `<input type="checkbox"${hideTools ? " checked" : ""}> 隐藏工具结果`);
+    cb.querySelector("input").onchange = (ev) => { hideTools = ev.target.checked; loadTree(); };
+    head.appendChild(cb);
+    head.appendChild(el("span", null, `${shown.length} 个节点`));
+    const nforks = rows.filter(r => r.forks > 1).length;
+    head.appendChild(el("span", null, nforks ? `${nforks} 个分叉点` : "无分叉（线性）"));
+    head.appendChild(el("span", null, "点击条目 = 跳转"));
+    bar.appendChild(head);
+
+    const body = document.createElement("div");
+    body.id = "treebody";
+    for (const { node: n, guide: g, forks } of shown){
+      const e = n.entry || {};
+      const row = el("div", "trow");
+      if (e.id && onPath.has(e.id)) row.classList.add("onpath");
+      if (e.id && e.id === j.leafId) row.classList.add("here");
+
+      // Connector glyphs, exactly like the TUI's tree.
+      const guideEl = el("span", "guide");
+      guideEl.textContent = g;
+      row.appendChild(guideEl);
+
+      if (n.label) row.appendChild(el("span","tlabel", esc(n.label)));
+      row.appendChild(el("span","who", treeGlyph(e)));
+      row.appendChild(el("span","txt", esc(treeLabel(e))));
+      if (forks > 1) row.appendChild(el("span","tfork", `⑂${forks}`));
+
+      if (e.id){
+        // Clicking the row moves the active branch here — the TUI's `/tree`
+        // navigation. pi's RPC has no command for it, so our pi extension
+        // supplies one.
+        row.title = "点击把活跃分支移到这里（/tree 导航）";
+        row.onclick = () => navigateTo(e.id);
+
+        const lb = el("button", null, n.label ? "改标签" : "标签");
+        lb.title = "给这个节点加标签";
+        lb.onclick = (ev) => { ev.stopPropagation(); labelEntry(e.id, n.label || ""); };
+        row.appendChild(lb);
+
+        if (e.type === "message" && (e.message||{}).role === "user"){
+          const b = el("button", null, "分叉");
+          b.title = "从这里开始一个新会话（/fork）";
+          b.onclick = (ev) => { ev.stopPropagation(); forkFrom(e.id); };
+          row.appendChild(b);
+        }
+      }
+      body.appendChild(row);
+    }
+    bar.appendChild(body);
+  } catch (e){ bar.innerHTML = `<div class="tempty">读取会话树失败：${esc(String(e))}</div>`; }
+}
+
+function treeGlyph(e){
+  if (e.type !== "message") return "·";
+  const r = (e.message || {}).role;
+  return r === "user" ? "👤" : r === "assistant" ? "🤖" : "↳";
+}
+
+function treeLabel(e){
+  if (e.type === "message"){
+    const m = e.message || {};
+    const c = m.content;
+    let t = "";
+    if (typeof c === "string") t = c;
+    else if (Array.isArray(c)){
+      const first = c.find(x => x.type === "text" || x.type === "thinking");
+      t = first ? (first.text || first.thinking || "") : `[${c.map(x=>x.type).join(",")}]`;
+    }
+    return (m.role === "toolResult" ? "工具结果 " : "") +
+           (t ? t.replace(/\s+/g," ").slice(0,70) : String(m.role||""));
+  }
+  if (e.type === "model_change") return `切换模型 → ${e.provider||""}/${e.modelId||""}`;
+  if (e.type === "thinking_level_change") return `推理档位 → ${e.thinkingLevel}`;
+  if (e.type === "compaction") return "上下文压缩";
+  if (e.type === "branch_summary") return "分支摘要";
+  if (e.type === "session_info") return `会话名 → ${e.name||""}`;
+  return e.type || "?";
+}
+
+function renderStats(st){
+  const bar = $("stats");
+  if (!st || !Object.keys(st).length){ bar.style.display = "none"; return; }
+  const cu = st.contextUsage || {};
+  const pct = (cu.percent === null || cu.percent === undefined) ? null : Math.round(cu.percent);
+  const tk = st.tokens || {};
+  bar.innerHTML =
+    `<span>消息 <b>${st.totalMessages ?? "–"}</b></span>` +
+    `<span>工具 <b>${st.toolCalls ?? "–"}</b></span>` +
+    `<span>tokens <b>${(tk.total||0).toLocaleString()}</b></span>` +
+    `<span>花费 <b>$${(st.cost||0).toFixed(4)}</b></span>` +
+    (pct !== null
+      ? `<span>上下文 <span class="bar"><i style="width:${Math.min(pct,100)}%"></i></span> <b>${pct}%</b></span>`
+      : `<span title="模型未上报上下文窗口">上下文 <b>–</b></span>`);
+  bar.style.display = "flex";
+}
+
+async function navigateTo(entryId, silent){
+  if (!silent && !confirm("把活跃分支移到这里？\n\n之后的对话会从这一点继续；原分支会保留在树里。")) return;
+  try {
+    const r = await fetch(`${base()}/api/chat/navigate`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper(), entryId }),
+    });
+    const j = await r.json();
+    if (!j.ok){ addError(j.error || "导航失败"); return; }
+    addSystem("正在移动…");
+    setTimeout(refreshAfterTreeChange, 900);
+  } catch (e){ addError(`导航失败：${e}`); }
+}
+
+async function labelEntry(entryId, current){
+  const v = prompt("标签（留空则清除）", current || "");
+  if (v === null) return;
+  try {
+    const r = await fetch(`${base()}/api/chat/label`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper(), entryId, label: v }),
+    });
+    const j = await r.json();
+    if (!j.ok){ addError(j.error || "设置标签失败"); return; }
+    setTimeout(() => { if (treeOpen) loadTree(); }, 600);
+  } catch (e){ addError(`设置标签失败：${e}`); }
+}
+
+/** After a tree move the branch, the message list and the tree all change. */
+async function refreshAfterTreeChange(){
+  run = null; running = false;
+  await loadHistory();
+  if (treeOpen) await loadTree(); else await refreshStats();
+}
+
+async function forkFrom(entryId){
+  if (!confirm("从这里开始新分支？\n当前分支会保留，新分支从这条消息重新开始。")) return;
+  try {
+    const r = await fetch(`${base()}/api/chat/fork`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper(), entryId }),
+    });
+    const j = await r.json();
+    if (!j.ok){ addError(j.error || "分叉失败"); return; }
+    addSystem("已分叉到新分支。");
+    run = null; running = false;
+    await loadHistory(); await loadSessions(); loadTree();
+  } catch (e){ addError(`分叉失败：${e}`); }
+}
+
+/* ------------------------------------------------------------------ *
+ * composer commands
+ *
+ * Two kinds are available:
+ *   - LOCAL ones handled by this page (opening the tree, renaming, …) — pi has
+ *     no idea what those mean.
+ *   - pi's own commands (extensions / prompt templates / skills), listed by
+ *     /api/chat/commands and forwarded as a normal prompt. Our tree extension
+ *     lands here, which is why `/goto` works even though it is "local-ish".
+ * ------------------------------------------------------------------ */
+
+const LOCAL_CMDS = {
+  "/tree":      () => toggleTree(),
+  "/new":       () => newSession(),
+  "/rename":    () => renameSession(),
+  "/delete":    () => deleteSession(),
+  "/clone":     () => cloneSession(),
+  "/export":    () => exportSession(),
+  "/sessions":  () => printSessions(),
+  "/goto":      (a) => cmdGoto(a),
+  "/label":     (a) => cmdLabel(a),
+  "/help":      () => showHelp(),
+  "/clear":     () => { box.innerHTML = ""; run = null; addSystem("界面已清空（会话未改动）"); },
+};
+
+const LOCAL_DESC = {
+  "/tree":     "打开 / 关闭会话树",
+  "/new":      "开始一个新会话",
+  "/rename":   "重命名当前会话",
+  "/delete":   "删除下拉框选中的会话",
+  "/clone":    "把当前分支复制成新会话",
+  "/export":   "导出会话为 HTML",
+  "/sessions": "列出本论文的所有会话",
+  "/goto":     "跳转到某节点（/goto <id前缀>）",
+  "/label":    "给节点加标签（/label <id前缀> <文字>）",
+  "/help":     "显示所有可用命令",
+  "/clear":    "只清空界面，不动会话",
+};
+
+let piCommands = [];
+
+async function loadPiCommands(){
+  try {
+    const r = await fetch(`${base()}/api/chat/commands?arxiv_id=${encodeURIComponent(paper())}`);
+    piCommands = (await r.json()).commands || [];
+  } catch (_){ piCommands = []; }
+}
+
+/** Accept a short id prefix — full entry ids are unwieldy to type. */
+async function resolveEntry(prefix){
+  const j = await fetchTree();
+  const ids = [];
+  (function walk(ns){ for (const n of ns){ ids.push(n.entry.id); walk(n.children || []); } })(j.tree || []);
+  const hits = ids.filter(id => id && id.startsWith(prefix));
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1){ addError(`前缀 ${prefix} 匹配到 ${hits.length} 个节点，请多写几位`); return null; }
+  addError(`找不到节点：${prefix}`);
+  return null;
+}
+
+async function cmdGoto(args){
+  const p = (args || "").trim();
+  if (!p){ addError("用法：/goto <entryId 前缀>"); return; }
+  const id = await resolveEntry(p);
+  if (id) await navigateTo(id, true);        // explicit command → no confirm
+}
+
+async function cmdLabel(args){
+  const parts = (args || "").trim().split(/\s+/);
+  if (!parts[0]){ addError("用法：/label <entryId 前缀> <文字>"); return; }
+  const id = await resolveEntry(parts[0]);
+  if (!id) return;
+  const text = parts.slice(1).join(" ");
+  try {
+    const j = await (await fetch(`${base()}/api/chat/label`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper(), entryId: id, label: text }),
+    })).json();
+    if (!j.ok){ addError(j.error || "设置标签失败"); return; }
+    addSystem(text ? `已加标签「${text}」` : "已移除标签");
+    if (treeOpen) setTimeout(loadTree, 500);
+  } catch (e){ addError(`设置标签失败：${e}`); }
+}
+
+async function cloneSession(){
+  try {
+    const j = await (await fetch(`${base()}/api/chat/clone`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper() }),
+    })).json();
+    if (!j.ok){ addError(j.error || "复制失败"); return; }
+    addSystem("已把当前分支复制成新会话。");
+    await loadSessions(); await loadHistory(); refreshStats();
+  } catch (e){ addError(`复制失败：${e}`); }
+}
+
+async function exportSession(){
+  try {
+    const j = await (await fetch(`${base()}/api/chat/export`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper() }),
+    })).json();
+    if (!j.ok){ addError(j.error || "导出失败"); return; }
+    addSystem(`已导出：${j.path}`);
+  } catch (e){ addError(`导出失败：${e}`); }
+}
+
+async function printSessions(){
+  try {
+    const j = await (await fetch(`${base()}/api/chat/sessions?arxiv_id=${encodeURIComponent(paper())}`)).json();
+    const list = j.sessions || [];
+    if (!list.length){ addSystem("还没有会话。"); return; }
+    addSystem(`${list.length} 个会话：` + list.map(s =>
+      `${s.title}(${s.messages}条)`).join(" · "));
+  } catch (e){ addError(`读取会话列表失败：${e}`); }
+}
+
+function showHelp(){
+  const local = Object.entries(LOCAL_DESC).map(([c, d]) => `${c} — ${d}`).join("\n");
+  const pi = piCommands.length
+    ? piCommands.map(c => `/${c.name} — [${c.source}] ${c.description || ""}`).join("\n")
+    : "（pi 没返回扩展/模板/skill 命令）";
+  addSystem(`本界面的命令：\n${local}\n\npi 的命令（经由 prompt 转发）：\n${pi}\n\n其他输入一律当成提问发给 agent。`);
+}
+
+/** Route a composer submission. Returns true if it was a command. */
+async function runComposerCommand(text){
+  const m = text.match(/^(\/[A-Za-z][\w:-]*)\s*([\s\S]*)$/);
+  if (!m) return false;
+  const [, name, args] = m;
+
+  if (LOCAL_CMDS[name]){ await LOCAL_CMDS[name](args.trim()); return true; }
+
+  // Unknown to us: let pi try (extension / prompt template / skill command).
+  // `/skill:name` and templates are expanded by pi itself.
+  const knownOnPi = piCommands.some(c => `/${c.name}` === name);
+  if (!knownOnPi){
+    addError(`未知命令 ${name}。输入 /help 看可用命令。\n（如果这是 pi 的扩展命令，它可能还没加载完。）`);
+    return true;
+  }
+  return false;                 // forward to pi as a prompt
+}
+
+/* command dropdown ------------------------------------------------- */
+
+function cmdItems(){
+  const local = Object.entries(LOCAL_DESC).map(([cmd, d]) => ({ cmd, desc: d, src: "local" }));
+  const pi = piCommands.map(c => ({ cmd: `/${c.name}`, desc: c.description || "", src: c.source }));
+  return local.concat(pi);
+}
+
+let cmdSel = 0;
+
+function maybeShowCmds(){
+  const el0 = $("cmds");
+  const v = $("input").value;
+  if (!v.startsWith("/") || /\s/.test(v)){ hideCmds(); return; }
+  const hits = cmdItems().filter(i => i.cmd.startsWith(v));
+  if (!hits.length){ hideCmds(); return; }
+  cmdSel = Math.min(cmdSel, hits.length - 1);
+  el0.dataset.n = String(hits.length);
+  el0.innerHTML = '<div class="hdr">Tab 补全 · Enter 执行 · Esc 关闭</div>' +
+    hits.map((h, i) => `<div class="c${i === cmdSel ? " sel" : ""}" data-i="${i}">` +
+      `<code>${esc(h.cmd)}</code><span>${esc(h.desc)}</span></div>`).join("");
+  el0.dataset.list = JSON.stringify(hits.map(h => h.cmd));
+  el0.style.display = "block";
+  el0.querySelectorAll(".c").forEach(n => {
+    n.onclick = () => { $("input").value = JSON.parse(el0.dataset.list)[+n.dataset.i]; hideCmds(); autosize(); $("input").focus(); };
+  });
+}
+
+function hideCmds(){ $("cmds").style.display = "none"; cmdSel = 0; }
+
+function cmdsVisible(){ return $("cmds").style.display === "block"; }
+
+function cmdsMove(delta){
+  const el0 = $("cmds");
+  const n = +(el0.dataset.n || 1);
+  cmdSel = (cmdSel + delta + n) % n;
+  el0.querySelectorAll(".c").forEach((c, i) => c.classList.toggle("sel", i === cmdSel));
+}
+
+function cmdsComplete(){
+  const list = JSON.parse($("cmds").dataset.list || "[]");
+  if (list[cmdSel]) { $("input").value = list[cmdSel]; autosize(); }
+}
+
+/* ------------------------------------------------------------------ *
+ * persistent event stream
+ * ------------------------------------------------------------------ */
+
+async function connectStream(){
+  if (streamAbort) return;
+  const ctrl = new AbortController();
+  streamAbort = ctrl;
+  setDot("conn");
+  try {
+    const resp = await fetch(
+      `${base()}/api/chat/stream?arxiv_id=${encodeURIComponent(paper())}`,
+      { signal: ctrl.signal, headers: { Accept: "text/event-stream" } });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    streamUp = true; setDot(running ? "busy" : "on");
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;){
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0){
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        for (const line of frame.split("\n")){
+          if (!line.startsWith("data:")) continue;      // ": ping" heartbeats
+          const json = line.slice(5).trim();
+          if (!json) continue;
+          try { handleEvent(JSON.parse(json)); } catch (_) {}
+        }
+      }
+    }
+  } catch (e){
+    if (e.name !== "AbortError") setDot("err");
+  } finally {
+    streamUp = false; streamAbort = null;
+    if (running){ running = false; if (run) run.tools.forEach(d => d.open = false); }
+    paint(run || { body: document.createElement("div"), raw: "" }, true);
+    setTimeout(() => { if (!streamAbort) connectStream(); }, 1500);   // auto-reconnect
+  }
+}
+
+// The header dot reflects the *connection and agent* state — it is not a session
+// marker. Since a bare coloured dot is unreadable, spell it out unless healthy.
+const DOT_STATE = {
+  "":     "未连接",
+  "conn": "连接中…",
+  "on":   "已连接",
+  "busy": "agent 运行中",
+  "err":  "连接失败",
+};
+
+function setDot(kind){
+  kind = (kind === "on" || kind === "err" || kind === "busy" || kind === "conn")
+    ? kind : "";
+  const d = $("dot");
+  d.className = (kind === "conn") ? "" : kind;      // connecting keeps a neutral dot
+  const text = DOT_STATE[kind];
+  d.title = `连接状态：${text}（与当前会话无关）`;
+  const lbl = $("dotlbl");
+  // Healthy and busy are self-evident from the UI; anything else is not.
+  const show = (kind === "err" || kind === "" || kind === "conn");
+  lbl.textContent = show ? text : "";
+  lbl.title = d.title;
+}
+
+function handleEvent(ev){
+  switch (ev.type){
+    case "agent_start": {
+      running = true; setDot("busy");
+      const r = ensureRun();
+      r.errored = false;
+      break;
+    }
+    case "message_update": {
+      const d = ev.assistantMessageEvent || {};
+      const r = ensureRun();
+      if (d.type === "thinking_delta"){ showThinking(r, d.delta || ""); }
+      else if (d.type === "text_delta"){ r.raw += (d.delta || ""); paint(r); }
+      break;
+    }
+    case "tool_execution_start": {
+      const r = ensureRun();
+      if (!r.tools.has(ev.toolCallId)){
+        const d = el("details","tool");
+        d.innerHTML = `<summary>⏺ ${esc(ev.toolName || "tool")} ` +
+          `<span style="opacity:.7">${esc(JSON.stringify(ev.args||{}).slice(0,90))}</span></summary><pre></pre>`;
+        r.wrap.insertBefore(d, r.body);
+        r.tools.set(ev.toolCallId, d);
+      }
+      break;
+    }
+    case "tool_execution_end": {
+      const r = run;
+      const d = r && r.tools.get(ev.toolCallId);
+      if (d){
+        const s = d.querySelector("summary");
+        s.innerHTML = (ev.isError ? "✕ " : "✓ ") + s.innerHTML.replace(/^[⏺✓✕]\s*/,"");
+        try {
+          d.querySelector("pre").textContent =
+            (ev.result?.content || []).map(c => c.text || "").join("").slice(0, 6000);
+        } catch (_){}
+      }
+      break;
+    }
+    case "message_end": {
+      const m = ev.message;
+      if (!m) break;
+      if (m.role === "assistant"){
+        const r = ensureRun();
+        // pi's docs: message_end.message is authoritative — prefer it over the
+        // deltas we accumulated.
+        if (Array.isArray(m.content)){
+          const text = m.content.filter(c => c.type === "text").map(c => c.text).join("");
+          const think = m.content.filter(c => c.type === "thinking").map(c => c.thinking || "").join("");
+          if (text) r.raw = text;
+          // If the provider did not stream thinking deltas, it is still here.
+          if (think && !r.sawThinking) showThinking(r, think);
+        }
+        if (m.stopReason === "error") reportModelError(r, m);
+        paint(r, true);
+      } else if (m.role === "user"){
+        const text = Array.isArray(m.content)
+          ? m.content.filter(c => c.type === "text").map(c => c.text).join("") : "";
+        if (text && !pendingUserText.has(text)) addUser(text);
+        else pendingUserText.delete(text);
+      }
+      break;
+    }
+    case "agent_end": {
+      for (const m of (ev.messages || [])){
+        if (m && m.role === "assistant" && m.stopReason === "error"){
+          reportModelError(ensureRun(), m);
+        }
+      }
+      break;
+    }
+    case "agent_settled": {
+      running = false; stopping = false; setDot(streamUp ? "on" : "");
+      if (run){ paint(run, true); run.tools.forEach(d => d.open = false); run = null; }
+      updButtons();
+      loadSessions();                 // a new session file may have appeared
+      if (treeOpen) loadTree(); else refreshStats();
+      break;
+    }
+    case "auto_retry_start":
+      addSystem(`重试中 (${ev.attempt}/${ev.maxAttempts}) …`); break;
+    case "compaction_start":
+      addSystem(`正在压缩上下文（${ev.reason}）…`); break;
+    case "reaper_bridge": {
+      if (ev.state === "connected"){
+        setDot(running ? "busy" : "on");
+        loadPiCommands();        // commands need a live pi process to list
+        loadSessions();          // now that a process exists, resolve `current`
+      }
+      else if (ev.state === "session_switched"){
+        // A normal operation, not a failure — the stream simply moved to a new
+        // pi process. Without this the dot stayed red after every switch.
+        setDot(running ? "busy" : "on");
+        loadHistory(); loadSessions();
+        if (treeOpen) loadTree(); else refreshStats();
+      }
+      else if (ev.state === "exited" || ev.state === "reader_error"){
+        setDot("err");
+      }
+      else if (ev.state === "stopped"){
+        /* neutral: the process is being replaced or shut down deliberately */
+      }
+      else if (ev.state === "stderr" && ev.text && !/Invalid settings file/.test(ev.text))
+        addSystem(ev.text);
+      break;
+    }
+    case "extension_error":
+      addError(`扩展错误 (${ev.event}): ${ev.error}`); break;
+    case "extension_ui_request": {
+      // Fire-and-forget notices from extensions. Ours (reaper-tree.ts) uses them
+      // to report tree navigation, so refresh the views when one arrives.
+      if (ev.method === "notify" && ev.message){
+        addSystem(ev.message);
+        if (/^(moved to|navigation cancelled|labeled|unlabeled)/.test(ev.message)){
+          refreshAfterTreeChange();
+        }
+      }
+      break;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * actions
+ * ------------------------------------------------------------------ */
+
+function payload(text){
+  return chip ? `关于这段（${chip.loc}）：\n> ${chip.text}\n\n${text}` : text;
+}
+
+async function send(){
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || sending) return;
+  hideCmds();
+
+  // Slash commands are resolved before anything is sent to the agent. A command
+  // we do not own is handed to pi as a prompt (that is how extension commands
+  // and prompt templates work).
+  if (text.startsWith("/")){
+    const handled = await runComposerCommand(text);
+    if (handled){ input.value = ""; autosize(); return; }
+  }
+
+  const outgoing = payload(text);
+  addUser(chip ? `关于「${chip.loc}」：${text}` : text);
+  pendingUserText.add(outgoing);
+  input.value = ""; autosize(); clearChip();
+  ensureRun();
+
+  sending = true; updButtons();
+  try {
+    const r = await fetch(`${base()}/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ arxiv_id: paper(), message: outgoing }),
+    });
+    const j = await r.json();
+    if (!j.accepted){
+      pendingUserText.delete(outgoing);
+      if (run && run.wrap.isConnected && !run.raw) run.wrap.remove();
+      run = null;
+      addError(j.error || "pi 拒绝了这条消息（未知原因）");
+    }
+  } catch (e){
+    pendingUserText.delete(outgoing);
+    addError(`无法连接 ${base()}\n${e}\n\n请确认 Reaper 服务器在运行。`);
+    setDot("err");
+  } finally {
+    sending = false; updButtons();
+  }
+}
+
+let stopping = false;
+
+async function stop(){
+  if (stopping || (!running && !sending)) return;
+  stopping = true; updButtons();
+  addSystem("正在中断…");
+  try {
+    const j = await (await fetch(`${base()}/api/chat/abort`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ arxiv_id: paper() }),
+    })).json();
+    if (j.aborted) addSystem("已请求中断，等待 agent 停下来…");
+    else if (j.reason) addSystem(`没有可中断的回合（${j.reason}）`);
+  } catch (e){
+    addError(`中断失败：${e}`);
+  } finally {
+    // Stay in the "stopping" state until agent_settled arrives; if it never
+    // does, fall back so the button does not stick forever.
+    setTimeout(() => { if (stopping){ stopping = false; updButtons(); } }, 8000);
+  }
+}
+
+async function newSession(){
+  try {
+    await fetch(`${base()}/api/chat/new`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ arxiv_id: paper() }),
+    });
+    box.innerHTML = "";
+    run = null; running = false; stopping = false;
+    addSystem("新会话已开始。");
+    await loadSessions();          // reflect the fresh conversation immediately
+    if (treeOpen) loadTree(); else refreshStats();
+  } catch (e){ addError(`新建会话失败：${e}`); }
+}
+
+async function openSession(id){
+  try {
+    const r = await fetch(`${base()}/api/chat/open`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ arxiv_id: paper(), session: id }),
+    });
+    const j = await r.json();
+    if (!j.ok){ addError(j.error || "打开会话失败"); return; }
+    run = null; running = false;
+    await loadHistory();
+    refreshStats();
+    if (treeOpen) loadTree();
+    scroll(true);
+  } catch (e){ addError(`打开会话失败：${e}`); }
+}
+
+async function switchPaper(){
+  if (streamAbort){ try { streamAbort.abort(); } catch(_){} streamAbort = null; }
+  run = null; running = false;
+  await loadSessions();
+  await loadHistory();
+  refreshStats();
+  if (treeOpen) loadTree();
+  connectStream();
+}
+
+function setChip(loc, text){
+  chip = { loc, text };
+  $("chipLoc").textContent = loc;
+  $("chipText").textContent = text.length > 160 ? text.slice(0,160)+"…" : text;
+  $("chip").style.display = "block";
+}
+function clearChip(){ chip = null; $("chip").style.display = "none"; }
+window.setChip = setChip; window.clearChip = clearChip;
+
+/* ------------------------------------------------------------------ *
+ * input plumbing
+ * ------------------------------------------------------------------ */
+
+function autosize(){
+  const t = $("input");
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 170) + "px";
+}
+function updButtons(){
+  const s = $("send"), t = $("stop");
+  s.disabled = sending || running;
+  s.textContent = sending ? "…" : "↑";
+  t.disabled = !running || stopping;
+  t.textContent = stopping ? "…" : "■";
+  t.title = stopping ? "正在中断…" : "中断 (Esc)";
+}
+
+function wireHints(){
+  document.querySelectorAll(".hint button").forEach(b => {
+    b.onclick = () => { $("input").value = b.textContent; autosize(); $("input").focus(); };
+  });
+}
+
+$("send").onclick = send;
+$("stop").onclick = stop;
+$("new").onclick = newSession;
+$("sessbtn").onclick = toggleSessions;
+$("tree").onclick = toggleTree;
+$("reload").onclick = switchPaper;
+$("input").addEventListener("input", () => { autosize(); maybeShowCmds(); });
+$("input").addEventListener("keydown", (e) => {
+  if (cmdsVisible()){
+    if (e.key === "ArrowDown"){ e.preventDefault(); cmdsMove(1);  return; }
+    if (e.key === "ArrowUp"){   e.preventDefault(); cmdsMove(-1); return; }
+    if (e.key === "Tab"){       e.preventDefault(); cmdsComplete(); return; }
+    if (e.key === "Escape"){    e.preventDefault(); hideCmds(); return; }
+  }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing){
+    e.preventDefault(); send();
+  }
+});
+
+// Esc anywhere aborts the current turn — the same reflex as the TUI.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (cmdsVisible()){ hideCmds(); return; }
+  if (running || sending){ e.preventDefault(); stop(); }
+});
+
+(async function boot(){
+  autosize(); updButtons(); wireHints();
+  setDot("conn");
+  // Each step is isolated: a failure in any one of them must not stop the event
+  // stream from connecting (which is what left the status stuck before).
+  const step = async (name, fn) => {
+    try { await fn(); } catch (e){ addError(`${name}失败：${e}`); }
+  };
+  connectStream();                      // long-lived; start it first
+  await step("读取会话列表", loadSessions);
+  await step("读取历史", loadHistory);
+  await step("读取统计", refreshStats);
+  await step("读取命令", loadPiCommands);
+})();
+</script>
+</body>
+</html>

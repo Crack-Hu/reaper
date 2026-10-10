@@ -1,6 +1,7 @@
 """Translation task — state management with persistence.
 
-Each paper gets one Task stored at data/tasks/{arxiv_id}.json.
+Each paper gets one Task stored at config.task_state_path(arxiv_id)
+(i.e. data/papers/{arxiv_id}/process/state.json).
 Survives crashes: on load, detects if previous run was interrupted.
 """
 
@@ -110,8 +111,15 @@ class Task:
     # ──── persistence ────
 
     @classmethod
-    def load(cls, arxiv_id: str, tasks_dir: str) -> "Task":
-        path = os.path.join(tasks_dir, f"{arxiv_id}.json")
+    def load(cls, arxiv_id: str, path: str | None = None) -> "Task":
+        """Load a task from disk.
+
+        `path` is the exact JSON file to use. When omitted it defaults to
+        ``config.task_state_path(arxiv_id)`` (i.e. the per-paper layout).
+        """
+        if path is None:
+            from . import config
+            path = config.task_state_path(arxiv_id)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 d = json.load(f)
