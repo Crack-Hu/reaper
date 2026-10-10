@@ -47,5 +47,5 @@
 
 ## 环境
 
-- macOS + Python 3.14；依赖 `httpx`（无 requirements 文件，按 import 安装）。
+- macOS + Python 3.14；依赖 `httpx`（`pip3 install -r requirements.txt`）。
 - 后端：`python3 src/server.py`；测试页：`/api/chat/prototype`。
