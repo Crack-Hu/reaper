@@ -179,7 +179,7 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
         if tex_files:
             main_tex = tex_files[0]
 
-    # Clean old docker output in source dir (now outputs to data/ar5ivist/)
+    # Clean old docker output in the source dir (docker now writes into source_dir)
     old_html = target_dir / "html"
     if old_html.exists():
         import shutil
@@ -191,8 +191,7 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
 def _try_ar5ivist_docker(arxiv_id: str) -> str:
     """用 ar5ivist Docker 转换 LaTeX → HTML。
 
-    Source: data/arxiv_source/{id}/  (只放 tex 源文件)
-    Output: data/ar5ivist/{id}/html/ (Docker 生成的 HTML + 图片)
+    Source + output: config.source_dir(arxiv_id)  (tex 源码 + Docker 生成的 HTML/图片)
     """
     source_dir = Path(config.source_dir(arxiv_id))
     output_dir = Path(config.source_dir(arxiv_id))

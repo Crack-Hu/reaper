@@ -1,5 +1,9 @@
 # Reaper Chat — 产品计划（讨论稿）
 
+> ⚠️ 本文是**设计讨论稿**（决策记录）。当前实现状态、文件名与落点以 `HANDOFF.md` 和 `src/chat/README.md` 为准：
+> 设计稿里的 `pi_bridge.py` 最终为 `bridge.py`，`pi_ext.py` 最终为 `session.py`，`citations.py` 尚未实现。
+> 各阶段进度对照见 `HANDOFF.md` §2。
+
 > 把 Reaper 从「生成双语 HTML」扩展为「能用 AI 读懂这篇论文」。
 > 目标：在 Zotero 里选中一段话，就能围绕它和 agent 对话；agent 手上有这篇论文的 TeX 源码。
 

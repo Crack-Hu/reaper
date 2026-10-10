@@ -1,6 +1,7 @@
 """Translation task — state management with persistence.
 
-Each paper gets one Task stored at data/tasks/{arxiv_id}.json.
+Each paper gets one Task stored at config.task_state_path(arxiv_id)
+(i.e. data/papers/{arxiv_id}/process/state.json).
 Survives crashes: on load, detects if previous run was interrupted.
 """
 

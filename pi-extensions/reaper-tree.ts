@@ -8,7 +8,7 @@
  * two: Reaper sends `/goto <entryId>` as a prompt and the navigation happens
  * inside the same pi process, with the same session state.
  *
- * Loaded with `pi --extension <path>` (see src/chat/pi_ext.py). Commands are
+ * Loaded with `pi --extension <path>` (see src/chat/session.py). Commands are
  * discoverable at runtime via the RPC `get_commands` call.
  *
  * Results are reported with ctx.ui.notify(), which in RPC mode arrives on

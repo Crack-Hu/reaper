@@ -68,7 +68,7 @@ def expand_macros(latex: str, table: dict[str, tuple[int, str]]) -> str:
 
 
 def _sorted_table(table: dict) -> list:
-    """Longest name first, so \longmacro is tried before \long."""
+    r"""Longest name first, so \longmacro is tried before \long."""
     return sorted(table.items(), key=lambda x: -len(x[0]))
 
 

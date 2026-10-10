@@ -3,7 +3,7 @@
 Turns a paper that Reaper already processed (cached HTML + parsed blocks)
 into a small, byte-stable *workspace* the agent can read and grep:
 
-    data/chat/{arxiv_id}/workspace/
+    data/papers/{arxiv_id}/chat/workspace/
     ├── paper.md        Markdown + block anchors + LaTeX math
     ├── blocks.json     paragraph index (ids, sentence spans, math)
     ├── OUTLINE.md      byte-stable TOC front block

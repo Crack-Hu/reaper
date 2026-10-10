@@ -4,7 +4,7 @@ One pi process per paper (not one per browser tab, and not one global process):
 paper contexts stay isolated, a crash only affects its own paper, and lazy
 spawning is cheap because `pi --mode rpc` starts in well under a second.
 
-Sessions persist on disk under `data/chat/{arxiv_id}/sessions/`. Because pi only
+Sessions persist on disk under `data/papers/{arxiv_id}/chat/sessions/`. Because pi only
 writes a session file once a turn actually produces an assistant message, the
 directory is also our conversation history — which is what the UI's conversation
 list is built from.

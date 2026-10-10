@@ -153,7 +153,7 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             try:
                 from src.rendering.renderer import save_html, zotero_compatible_html
                 import os as _os, shutil as _shutil
-                # Output directory: data/zotero/{arxiv_id}[_{source}]/
+                # Output directory: config.reaper_html_dir(arxiv_id)[_{source}]/
                 out_dir = config.reaper_html_dir(arxiv_id)
                 if source:
                     out_dir += f"_{source}"

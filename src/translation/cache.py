@@ -3,7 +3,7 @@
 Stores the full pipeline state so that when the HTML hasn't changed,
 both parsing AND translation can be skipped entirely.
 
-File: data/translation_cache/{arxiv_id}.json
+File: config.translation_cache_dir(arxiv_id)/cache.json
 
 Structure:
 {
