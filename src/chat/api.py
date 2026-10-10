@@ -291,15 +291,14 @@ def _stream(handler, arxiv_id: str) -> None:
         handler._respond_json({"error": str(e)}, status=503)
         return
 
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "keep-alive")
-    handler.send_header("X-Accel-Buffering", "no")     # disable proxy buffering
-    handler.end_headers()
-
     last_write = time.monotonic()
     try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.send_header("X-Accel-Buffering", "no")     # disable proxy buffering
+        handler.end_headers()
         _sse(handler, {"type": "reaper_bridge", "state": "connected",
                        "arxiv_id": arxiv_id,
                        "session": bridge.session_path})
@@ -323,7 +322,7 @@ def _stream(handler, arxiv_id: str) -> None:
 
             _sse(handler, event)
             last_write = time.monotonic()
-    except (BrokenPipeError, ConnectionResetError):
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass                                            # client went away
     except Exception as e:                              # pragma: no cover
         try:

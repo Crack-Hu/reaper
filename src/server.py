@@ -30,6 +30,23 @@ print(f"=== Reaper Server started ===")
 print(f"Log: {logbook.merged_log_path()}")
 print(f"Per-paper logs: {config.LOG_DIR}/papers/")
 
+def paper_html_path(paper_id: str) -> Path | None:
+    """Newest generated bilingual HTML for a paper, or None.
+
+    A normal run writes `process/reaper_html/index.html`; forcing a source adds a
+    suffix (`process/reaper_html_<source>/index.html`), and light mode writes a
+    single `process/reaper_html*.html`. Serve whichever was written last.
+    """
+    if not paper_id or "/" in paper_id or "\\" in paper_id or paper_id.startswith("."):
+        return None                       # keep the endpoint inside data/papers/
+    process = PAPERS_DIR / paper_id / "process"
+    candidates = [f for f in process.glob("reaper_html*/index.html") if f.is_file()]
+    candidates += [f for f in process.glob("reaper_html*.html") if f.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda f: f.stat().st_mtime)
+
+
 from src.translation.dictionary import TermDictionary
 
 _term_dict_instance = None
@@ -51,6 +68,11 @@ def save_term_dict(data: dict):
         td.set_user(en, zh)
 
 
+# 客户端在响应写完前离开（长任务里很常见：标签页关闭、Zotero 重载、请求超时）。
+# 这类 socket 错误和论文处理无关，绝不能当成流水线失败，也不该打 traceback。
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
 class ReaperHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -61,21 +83,14 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             if chat_api.handle_get(self, parsed, urllib.parse.parse_qs(parsed.query)):
                 return
 
-        # /api/zotero_html/<paper_id> — serve generated bilingual HTML
+        # /api/zotero_html/<paper_id> — serve the newest generated bilingual HTML
         if parsed.path.startswith("/api/zotero_html/"):
             paper_id = parsed.path.split("/api/zotero_html/")[1].strip("/")
-            # Find matching file (directory format or single-file format)
-            dir_path = PAPERS_DIR / paper_id / "index.html"
-            if dir_path.exists():
-                html = dir_path.read_text(encoding="utf-8")
-                self._respond_html(html)
-                return
-            matches = list(PAPERS_DIR.glob(f"{paper_id}*.html"))
-            if matches:
-                html = matches[0].read_text(encoding="utf-8")
-                self._respond_html(html)
+            path = paper_html_path(paper_id)
+            if path is None:
+                self._respond_json({"error": f"no generated HTML for {paper_id}"}, 404)
             else:
-                self._respond_json({"error": "paper not found"}, 404)
+                self._respond_html(path.read_text(encoding="utf-8"))
             return
 
         # /api/terms
@@ -84,12 +99,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
             self._respond_json(terms)
             return
 
-        # / → list papers
+        # / → list papers that have generated HTML
         if parsed.path == "/" or parsed.path == "":
-            papers = [p.name for p in PAPERS_DIR.glob("*.html")]
+            names = sorted(d.name for d in PAPERS_DIR.iterdir()
+                           if d.is_dir() and paper_html_path(d.name) is not None)
             html = "<h2>Reaper Papers</h2><ul>" + "".join(
-                f'<li><a href="/api/zotero_html/{p.replace(".html","")}">{p}</a></li>'
-                for p in sorted(papers)
+                f'<li><a href="/api/zotero_html/{n}">{n}</a></li>' for n in names
             ) + "</ul>"
             self._respond_html(html)
             return
@@ -135,18 +150,12 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
             # 并发生成守卫：第二个请求直接被告知「正在处理中」，不重复跑流水线
             if not try_begin_generation(arxiv_id):
-                payload = json.dumps({
+                self._respond_json({
                     "ok": False,
                     "status": "processing",
                     "arxiv_id": arxiv_id,
                     "message": f"{arxiv_id} 正在处理中，请等待完成",
-                }, ensure_ascii=False).encode("utf-8")
-                self.send_response(202)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.send_header("X-Reaper-Status", "processing")
-                self.end_headers()
-                self.wfile.write(payload)
+                }, status=202, headers={"X-Reaper-Status": "processing"})
                 return
 
             # Generate complete HTML, save to directory, return path
@@ -174,13 +183,13 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
                     save_html(html, out_dir + ".html")
                 
                 # Respond with JSON + output path header (no giant HTML body)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                if embed and resource_dir:
-                    self.send_header("X-Output-Dir", _os.path.abspath(out_dir))
-                self.end_headers()
-                payload = json.dumps({"ok": True, "arxiv_id": arxiv_id}, ensure_ascii=False).encode("utf-8")
-                self.wfile.write(payload)
+                headers = ({"X-Output-Dir": _os.path.abspath(out_dir)}
+                           if embed and resource_dir else {})
+                self._respond_json({"ok": True, "arxiv_id": arxiv_id}, headers=headers)
+            except _CLIENT_GONE:
+                # 客户端先走了：论文已经生成并落盘，这不是处理失败
+                print(f"  [{arxiv_id}] client disconnected before the response was sent",
+                      flush=True)
             except Exception as e:
                 # Save error to task for diagnostics
                 from src.task import Task
@@ -423,21 +432,32 @@ class ReaperHandler(http.server.BaseHTTPRequestHandler):
 
     def _respond_html(self, html: str):
         data = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        # Write in chunks with flush
-        chunk = 65536
-        for i in range(0, len(data), chunk):
-            self.wfile.write(data[i:i+chunk])
-            self.wfile.flush()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            # Write in chunks with flush
+            chunk = 65536
+            for i in range(0, len(data), chunk):
+                self.wfile.write(data[i:i+chunk])
+                self.wfile.flush()
+        except _CLIENT_GONE:
+            pass          # 客户端已经不在，没有对象可回
 
-    def _respond_json(self, data: dict, status: int = 200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+    def _respond_json(self, data: dict, status: int = 200,
+                      headers: dict | None = None):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            pass
 
     def log_message(self, format, *args):
         print(f"  {' '.join(args)}")
