@@ -212,7 +212,7 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             "-v", f"{output_dir}:/output",
             "-w", "/source",
             "--user", f"{os.getuid()}:{os.getgid()}",
-            AR5IVIST_DOCKER_IMAGE,
+            config.AR5IVIST_DOCKER_IMAGE,
             "--source", main_tex.name,
             "--destination", f"/output/{arxiv_id}.html",
         ]
