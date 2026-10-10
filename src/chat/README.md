@@ -119,3 +119,57 @@ open http://127.0.0.1:16625/api/chat/prototype
 - 渲染器给每个 block 输出 `id="reaper-block-N"`（选中段落提问的前置项）。
 - `citations.py`：`\cite` → 被引论文全文（Phase 3，见 `CHAT_PLAN.md`）。
 - 工具审批 UI（Phase 4；当前靠只读工具白名单保证安全）。
+
+## 排查手册
+
+### 手工探针：绕过服务器直接和 pi 说话
+
+```bash
+cd data/papers/2210.00921/chat/workspace
+pi --mode rpc --tools read,grep,find,ls
+# 逐行输入 JSON（每行一条命令）：
+{"type":"get_state","id":"1"}
+{"type":"prompt","message":"核心方法是什么？","id":"2"}
+```
+
+能复现问题 → 在 pi / 模型侧；复现不了 → 在桥 / API 侧。
+
+### 常见症状
+
+| 症状 | 原因 / 处理 |
+|---|---|
+| `pi is not running` | 进程死了。看 `/api/chat/health` 的 `alive`、`stderr_tail` 和 `exited` 事件 |
+| `session file not found: … (refusing to start …)` | 会话文件被删或路径不对。这是**故意的**——pi 对不存在的 `--session` 会静默新建会话（历史看起来「消失」）。用 `/api/chat/sessions` 选有效会话或 `/api/chat/new` |
+| `prompt rejected: No API key found …` | pi 侧认证问题；bridge 会透传 pi 的原话，直接显示给用户即可 |
+| HTTP 409 `agent 正在运行中…` | 运行中禁止结构操作（pi issue #5096 会损坏会话树）；先 `abort` 或等结束 |
+| HTTP 403 `loopback-only` | 从非本机访问；设 `chat.allow_remote: true`（谨慎）或从本机访问 |
+| SSE 连上但无事件 | 查 `/api/chat/health`（`alive`/`streaming`）、bridge 的 `stderr` 事件；确认前后端 `arxiv_id` 一致 |
+| 面板看不到历史 | 检查 `data/papers/{id}/chat/sessions/*.jsonl` 是否存在；`/api/chat/sessions` 的 `current` 是否指向正确文件 |
+
+### 日志与事件
+
+- 服务器输出：终端 + `data/logs/server.log`（**不要**在 Server 外另开日志写入点）
+- pi 的 stderr：作为 `reaper_bridge/stderr` 事件广播（bridge 内存保留最近 50 行，
+  也出现在 `/api/chat/health` 的 `stderr_tail`）
+- SSE 事件两类：`agent_*`（pi 原生事件，如 `agent_start`/`agent_settled`）与
+  `reaper_bridge`（`connected`/`exited`/`session_switched`/`stderr`）
+
+## 本机测试素材（data/ 现状）
+
+| 论文 | source | 翻译缓存 | 双语 HTML | chat workspace | 会话 |
+|---|---|---|---|---|---|
+| `2210.00921`（Quantum Error Mitigation） | ✅ | ✅ | ✅ | ✅ 328 blocks / arxiv_html | 4 个 |
+| `2604.12841`（AI pre-decoders） | ✅ | ✅ | ✅ | ❌（可 prepare） | — |
+| `2401.18059` / `2403.03101` / `2404.16130` / `2408.08921` / `2409.13731` / `2501.13958` | ✅ | ✅ | ✅ | ❌ | — |
+
+`2210.00921` 是 Phase 0 的验证论文（有 List of Symbols 章节，适合考据类提问）。
+
+## 已知缺口
+
+- `prepare_paper_context(tex_dir=…)` 的**宏展开尚未接线**：`api.py` 调用时不传
+  `tex_dir`，所以 agent 看到的公式里作者自定义宏保持原样（如 `\est{O}` 不会展开成
+  `\hat{O}`）。要启用：在 prepare 流程里定位/下载 `.tex`
+  （`fetcher._download_arxiv_source()` 已有）并把目录传入。
+- 渲染器尚未给每个 block 输出 `id="reaper-block-{N}"`（选中段落提问的前置项，
+  见 `HANDOFF.md` §7.2；`OUTLINE.md` 的文案已引用该 id）。
+- `citations.py`（引用解析，Phase 3）未实现。

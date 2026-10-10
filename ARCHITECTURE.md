@@ -36,7 +36,7 @@ Reaper 由三个可独立运行的部分组成：
 | 对话 | `src/chat/` | 论文上下文 + pi 桥 + 会话注册表 + HTTP/SSE API |
 | 扩展 | `zotero-plugin/` | Zotero 插件 |
 | 扩展 | `pi-extensions/` | 补 pi RPC 缺失命令（`/goto`、`/label`、`/where`） |
-| 测试 | `tests/` | 单元 + 集成测试（未被 git 跟踪；fetch/render 类按旧 API 写，见 `tests/README.md`） |
+| 测试 | `tests/` | 单元 + 集成测试（fetch/render 类按旧 API 写，见 `tests/README.md`） |
 
 ## 3. 论文生成流水线
 
@@ -174,7 +174,6 @@ MathML→LaTeX 语义转换。
   "ar5ivist_docker_image": "latexml/ar5ivist:2512.17",
   "chat":     {"idle_timeout": 900, "tools": "read,grep,find,ls",
                "pi_bin": "pi", "allow_remote": false,
-               "extensions": ["pi-extensions/reaper-tree.ts"],
                "model": null, "thinking": null}
 }
 ```
@@ -182,6 +181,8 @@ MathML→LaTeX 语义转换。
 - `api.max_tokens` 必须覆盖推理 token（推理模型的 reasoning 也算在内）。
 - `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
 - `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
+- `chat.extensions` 不写时自动加载 `pi-extensions/reaper-tree.ts`（绝对路径）；
+  手动配置时**必须是绝对路径**（pi 的 cwd 是 workspace，相对路径会失效）。
 - `translator.concurrency` 是**全局**翻译线程池大小，所有论文共享。
 
 ## 7. 数据模型

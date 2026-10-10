@@ -30,6 +30,19 @@
 > Reaper 只做「论文数据准备 + 通信桥 + 面板渲染 + Zotero 集成」。
 > **不要自建 LLM 循环 / 会话存储 / 压缩逻辑。**
 
+## 1.5 上手路线（给下一个 agent，约 30 分钟）
+
+1. 读 `AGENTS.md`（硬约束）→ 本文 §2–§4（状态 / 模块 / 两条链路）。
+2. 环境自检：`python3 -c "import httpx"`、`which pi && pi --version`、
+   `python3 -m compileall -q src tools`（见 §6、§10）。
+3. 跑纯单元测试确认基线：
+   `cd tests && python3 -m unittest run_tests.TestArxivIDExtraction run_tests.TestPaperCacheV2`
+   （测试整体现状见 `tests/README.md`，**先读再跑**）。
+4. 对话链路：`python3 src/server.py` → prepare `2210.00921` → 打开
+   `http://127.0.0.1:16625/api/chat/prototype` 提一个问题（命令见 §6）。
+5. 读 `src/chat/README.md`（当前开发重点）→ `zotero-plugin/README.md`
+   的「对话面板实现指南」（**下一步任务**，含文件清单 / 端点表 / 验收标准）。
+
 ## 2. 当前状态
 
 | 能力 | 状态 | 位置 |
@@ -72,7 +85,7 @@ reaper/
 ├── pi-extensions/                补 pi RPC 缺失的扩展命令 → pi-extensions/README.md
 ├── prototype/chat.html           对话后端手工测试页       → prototype/README.md
 ├── tools/migrate.py              一次性数据迁移脚本（旧扁平布局 → data/papers）
-├── tests/                        测试套件（注意：被 .gitignore 忽略）→ tests/README.md
+├── tests/                        测试套件（部分用例按旧 API 写）→ tests/README.md
 ├── config.json                   本地配置（含 API key，gitignore）
 └── data/                         运行时产物（gitignore）
 ```
@@ -123,13 +136,21 @@ data/
 └── logs/                           server.log + papers/{id}.log
 ```
 
-> ⚠️ 旧扁平布局（`data/ar5iv/`、`data/chat/`、`data/tasks/`、`data/translation_cache/`、
-> `data/zotero/`）是迁移前遗留，只被 `src/chat/context.py` 的 legacy fallback 引用。
-> **删除前注意**：旧 `data/chat/2210.00921/sessions/` 里有 3 个只存在于旧目录的会话文件。
+> 旧扁平布局已于 2026-10-10 清理（见 §11）；`src/chat/context.py` 的 legacy fallback
+> 现为死代码，保留仅用于兼容旧机器。
+
+**本机可用测试素材**：8 篇论文都有 source + 翻译缓存 + 双语 HTML；`2210.00921`
+另有 chat workspace（328 blocks）和 4 个会话，是 Phase 0 的验证论文。完整表格见
+`src/chat/README.md`「本机测试素材」。
 
 ## 6. 如何运行
 
 ```bash
+# 环境自检
+python3 -c "import httpx; print('httpx ok')"
+which pi && pi --version                     # 对话功能需要本机能跑 pi
+python3 -m compileall -q src tools
+
 # 后端（常驻）
 python3 src/server.py                        # → http://localhost:16625
 
@@ -158,6 +179,8 @@ bash zotero-plugin/setup.sh
    - 面板 JS 在 chrome 作用域，**请求必须从插件作用域发**（reader frame 注册了 BlockingObserver）
    - 流式读用 `fetch() + resp.body.getReader()`；**不要用 `EventSource`，也不要用 `Zotero.HTTP.request`**
    - 视觉：用 Zotero CSS 变量（`--color-sidepane`、`--fill-*`、`--color-accent`），不要硬编码颜色
+   - **完整实现指南（文件清单 / 端点表 / 硬约束 / 参考实现 / 验收清单）：`zotero-plugin/README.md`**；
+     验收标准原文 `CHAT_PLAN.md` §8；建议先做本文件 §7 提到的 Phase 0.5 前置验证
 2. **渲染器补 block 锚点**（选中段落的前置条件）
    - 现状：每个 block 只有 `data-reaper-id="{N}"`；只有标题被 `_inject_blocks_toc` 加了 `id="reaper-sec-{N}"`
    - 目标：每个 block 加 `id="reaper-block-{N}"`（Zotero 选择器生成器优先用 `id`）
@@ -196,19 +219,18 @@ bash zotero-plugin/setup.sh
 ## 9. 已知不一致 / 待修小项
 
 - `renderer` 尚未输出 `id="reaper-block-N"`（见 §7.2）；`src/chat/context.py` 的文案已引用它
-- `.gitignore` 把 `tests/` 也忽略了 → **测试代码未被 git 跟踪**（建议改为只忽略 `tests/__pycache__/`）
 - ~~旧扁平 `data/` 目录~~ → 已于 2026-10-10 清理，见 §11；`src/chat/context.py` 的 legacy
   fallback（`data/ar5iv/`…）现在是死代码，保留仅用于兼容旧机器
 - `CHAT_PLAN.md` 中的文件名是设计期命名（`pi_bridge.py`/`pi_ext.py`），实际为 `bridge.py`/`session.py`
 - `tests/run_tests.py` 的 fetch/render 用例用的是旧 API（元组解包 + `arxiv_id=`/`source_type=` 参数），
   直接跑会 TypeError；纯单元类（ID 解析、PaperCache v2）仍通过。修复方法见 `tests/README.md`
 - `zotero-plugin/setup.sh` 里打包逻辑重复了两遍（可合并）
-- `config.json.example` 的 `ar5ivist_dir` 是无人读取的历史字段
 
 ## 10. 环境
 
 - 开发机：macOS；Python 3.14（`__pycache__` 可见 cpython-314）
-- 依赖：`httpx`（网络）、Zotero 9/10（插件端）；无 Python 依赖清单文件（`requirements.txt` 不存在，按 import 装）
+- 依赖：`pip3 install -r requirements.txt`（只有 httpx）；插件端 Zotero 9/10。
+  本机 `pi` 需在 PATH（`which pi`；开发机为 `/opt/homebrew/bin/pi` 1.1.0）
 - LLM：兼容 OpenAI `/chat/completions` 的端点；`config.json → api.params` 原样透传
   （如 `reasoning_effort: none`），端点拒绝时会自动去掉参数重试一次
 - `config.json` 含真实 API key，已被 gitignore，**不要提交**
@@ -226,6 +248,13 @@ bash zotero-plugin/setup.sh
 | `ref_repo/`（180MB，14 个公开 clone） | 研究报告已留存在 `docs/`（含转存的 `little-alphaxiv-vs-alphaxiv-open.md`） |
 
 移入版本管理：`data/migrate.py` → `tools/migrate.py`。
+
+同一批次的仓库可交接性改动：
+- `.gitignore` 取消忽略 `tests/`、`docs/`、`materials/`（此前新 clone 拿不到测试与调研资料）
+- 新增根 `README.md`（人类/agent 共用入口）与 `requirements.txt`（httpx）
+- `config.json.example` 补上 `chat` 段、去掉无人读取的 `ar5ivist_dir`
+- 补文档：`zotero-plugin/README.md` 对话面板实现指南、`prototype/README.md` 移植映射、
+  `src/chat/README.md` 排查手册与测试素材
 抢救数据：`2404.16130`、`2501.13958` 的 HTML 原先只存在于嵌套目录，已上移到 `source/{id}.html`。
 
 > 注：本机 `trash` 受限，删除为永久操作；所有删除项均已先做等价性校验。

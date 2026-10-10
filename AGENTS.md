@@ -12,6 +12,7 @@
 | Zotero 插件 | `zotero-plugin/README.md` |
 | pi 扩展 | `pi-extensions/README.md` |
 | 测试/原型 | `tests/README.md`、`prototype/README.md` |
+| 上手路线 | `HANDOFF.md` §1.5（30 分钟）/ 根 `README.md` |
 
 ## 架构铁律
 
@@ -41,7 +42,7 @@
 ## 测试现状（注意）
 
 `tests/run_tests.py` 部分用例是按旧 API 写的（`FetchedPage` 之前），直接跑会
-`TypeError`；`tests/` 目录还被 `.gitignore` 忽略。详见 `tests/README.md`。
+`TypeError`；纯单元类（ID 解析、PaperCache v2）仍通过。详见 `tests/README.md`，
 新增/修改测试前先看该文件，避免误判「测试通过」。
 
 ## 环境
