@@ -35,6 +35,10 @@ AR5IVIST_DOCKER_IMAGE = cfg.get("ar5ivist_docker_image", "latexml/ar5ivist:2512.
 # LaTeXML 硬编码 100 个错误就中止整篇转换（Fatal:too_many_errors），而错误多的
 # 文档往往照样能转换。这里通过 --preload 的 binding 把上限抬高（0 = 不改）。
 AR5IVIST_MAX_ERRORS = int(cfg.get("ar5ivist_max_errors", 100000))
+
+# LaTeXML 画不了 Xy-pic/Qcircuit 图表，而且会因此吞掉图表之后的全部内容。
+# 开启后用一个 binding 把 \xymatrix 换成"跳过选项、吞掉图表体"的宏（不改论文源码）。
+AR5IVIST_XYPIC_STUB = bool(cfg.get("ar5ivist_xypic_stub", True))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
 LLM_API_KEY = api_cfg.get("key", "")

@@ -1,0 +1,34 @@
+% -*- mode: LaTeX -*-
+%
+% [Reaper] Keep Xy-pic / Qcircuit diagrams from destroying the conversion.
+%
+% `\Qcircuit` is only an alias for Xy-pic's `\xymatrix` (qcircuit.sty:
+% `\newcommand{\Qcircuit}{\xymatrix @*=<0em>}`). LaTeXML cannot lay out Xy-pic
+% matrices: every `_`/`^` inside a diagram is reported as "Script ... can only
+% appear in math mode" (one error per subscript), and the malformed alignment
+% then *swallows the rest of the document* — the output simply stops at the
+% first diagram. Reproduced with arXiv:2111.05176: sections 8-10, the
+% bibliography and all appendices were missing, even though LaTeXML reported a
+% completed conversion (Status:conversion:2).
+%
+% Fix, without touching the paper's sources: override `\xymatrix` so that it
+% skips the Xy-pic option tokens and swallows the diagram body, leaving a short
+% placeholder. Loaded with `--preload`, so `\AtBeginDocument` runs *after* the
+% real packages defined `\xymatrix`, and our definition wins.
+%
+% Trade-off: Xy-pic diagrams are dropped (LaTeXML cannot render them anyway).
+% Disable with `"ar5ivist_xypic_stub": false` in config.json.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{reaper-qcircuit}[2026/10/10 Reaper: neutralize Xy-pic diagrams for LaTeXML]
+
+\makeatletter
+% Skip option tokens (`@C=1em`, `@R=.7em`, `@*=<0em>`, `@!R`, ...) until the
+% begin-group token, then swallow the braced diagram body.
+\def\reaperSkipDiagram{%
+  \@ifnextchar\bgroup{\reaperEatDiagram}{\reaperSkipDiagramI}}
+\def\reaperSkipDiagramI#1{\reaperSkipDiagram}
+\long\def\reaperEatDiagram#1{\mbox{[diagram omitted]}}
+
+\AtBeginDocument{\let\xymatrix\reaperSkipDiagram}
+\makeatother

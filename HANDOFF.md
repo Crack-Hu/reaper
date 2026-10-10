@@ -213,11 +213,13 @@ bash zotero-plugin/setup.sh
   `source=ar5ivist_docker` 本地编译（命令见 `src/ingestion/README.md`）。
 - `ar5ivist_docker` 依赖本机 Docker + 镜像（`docker pull` 一次）；编译**没有超时**，
   慢论文可能很久，日志在 `source/ar5ivist.log`。
-- LaTeXML 有硬编码的 **100 错误上限**（`Fatal:too_many_errors`，仿 TeX，且**没有
-  命令行开关**——它是内部状态值 `MAX_ERRORS`）。`ar5ivist_docker` 用仓库自带的
-  binding（`src/ingestion/ar5ivist_bindings/reaper-maxerrors.ltxml`）+ `--preload`
-  把它抬高（`config.ar5ivist_max_errors`，默认 100000，0 = 关），让"错误多但能转换"
-  的论文照常出结果（案例 `2111.05176`）。**不要去改论文源码**。
+- LaTeXML 画不了 **Xy-pic / Qcircuit 图表**（`\Qcircuit` = `\xymatrix`）：每个下标
+  报一个错，而且**图表之后的全部内容被吞掉**（`2111.05176` 实测：第 7 节后截断，
+  8-10 节/参考文献/附录全丢，却报"完成"）。仓库自带两个转换器预设
+  （`src/ingestion/ar5ivist_bindings/`，随程序分发、只读挂载、`--preload` 注入）：
+  `reaper-qcircuit.sty` 把 `\xymatrix` 换成吞图表的宏（`ar5ivist_xypic_stub`），
+  `reaper-maxerrors.ltxml` 抬高硬编码的 100 错误上限（`ar5ivist_max_errors`）。
+  **不要去改论文源码**——作者源码没问题（真 LaTeX 能编出 154 页 PDF）。
 - `_try_ar5ivist_docker` 曾因重构漏改常量名（`AR5IVIST_DOCKER_IMAGE` 缺 `config.`
   前缀）而 100% 抛 NameError（已修）；改动 fetcher 后请跑
   `python3 -m compileall -q src` 与来源链冒烟（`python3 main.py <id>`）。

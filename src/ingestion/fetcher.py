@@ -216,9 +216,14 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             "-w", "/source",
             "--user", f"{os.getuid()}:{os.getgid()}",
         ]
-        # 抬高 LaTeXML 的 100 错误上限：多数"错误很多"的论文本来就能转换完，
-        # 只有撞上这个硬上限才会中止并写出空壳。binding 是只读挂载的仓库资产。
+        # 随程序分发的 LaTeXML bindings（只读挂载）。它们修正转换器自身的行为，
+        # 不需要改论文源码：抬高 100 错误上限 / 让 Xy-pic 图表不吞掉后续内容。
+        preloads = []
         if config.AR5IVIST_MAX_ERRORS > 0:
+            preloads.append("reaper-maxerrors.ltxml")
+        if config.AR5IVIST_XYPIC_STUB:
+            preloads.append("reaper-qcircuit.sty")
+        if preloads:
             cmd += [
                 "-v", f"{BINDINGS_DIR}:/reaper-bindings:ro",
                 "-e", f"REAPER_MAX_ERRORS={config.AR5IVIST_MAX_ERRORS}",
@@ -228,8 +233,9 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             "--source", main_tex.name,
             "--destination", f"/output/{arxiv_id}.html",
         ]
-        if config.AR5IVIST_MAX_ERRORS > 0:
-            cmd += ["--path=/reaper-bindings", "--preload=reaper-maxerrors.ltxml"]
+        if preloads:
+            cmd += ["--path=/reaper-bindings"]
+            cmd += [f"--preload={name}" for name in preloads]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
         last_line = [""]
