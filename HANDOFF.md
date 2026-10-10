@@ -84,7 +84,7 @@ reaper/
 ├── zotero-plugin/                Zotero 插件             → zotero-plugin/README.md
 ├── pi-extensions/                补 pi RPC 缺失的扩展命令 → pi-extensions/README.md
 ├── prototype/chat.html           对话后端手工测试页       → prototype/README.md
-├── tools/migrate.py              一次性数据迁移脚本（旧扁平布局 → data/papers）
+├── tools/                        一次性脚本：数据迁移、LaTeXML 源码修复 → tools/README.md
 ├── tests/                        测试套件（部分用例按旧 API 写）→ tests/README.md
 ├── config.json                   本地配置（含 API key，gitignore）
 └── data/                         运行时产物（gitignore）
@@ -206,6 +206,17 @@ bash zotero-plugin/setup.sh
 **对话安全**
 - 论文正文是不可信输入；Phase 1 agent 工具白名单固定为 `read,grep,find,ls`（只读）
 - reader 内嵌 iframe **不执行附件 HTML 里的 JS**（`allow-scripts` 未开）→ 现有 TOC/主题/译文开关在 Zotero reader 里可能无效（待真机确认；退路是 CSS-only 控件或改用外部浏览器阅读）
+
+**来源（fetcher）**
+- arXiv / ar5iv 的 HTML 可能不可用（转换挑错文件 → 模板样张；LaTeXML 撞 100 错误
+  上限 → 空壳页）。**Reaper 不做内容嗅探**：由用户显式换来源，例如
+  `source=ar5ivist_docker` 本地编译（命令见 `src/ingestion/README.md`）。
+- `ar5ivist_docker` 依赖本机 Docker + 镜像（`docker pull` 一次）；编译**没有超时**，
+  慢论文可能很久，日志在 `source/ar5ivist.log`。qcircuit 类论文可先用
+  `python3 tools/fix_latexml_source.py <source_dir> --apply` 压低错误数。
+- `_try_ar5ivist_docker` 曾因重构漏改常量名（`AR5IVIST_DOCKER_IMAGE` 缺 `config.`
+  前缀）而 100% 抛 NameError（已修）；改动 fetcher 后请跑
+  `python3 -m compileall -q src` 与来源链冒烟（`python3 main.py <id>`）。
 
 **渲染（用户多次强调）**
 - 正文包在 `<div class="reaper-content">` 画布内，工具栏/TOC 在画布外
