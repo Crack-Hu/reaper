@@ -21,6 +21,7 @@
     { "type": "ar5ivist_docker" }
   ],
   "ar5ivist_docker_image": "latexml/ar5ivist:2512.17",
+  "ar5ivist_max_errors": 100000,
   "chat": {
     "idle_timeout": 900,
     "tools": "read,grep,find,ls",

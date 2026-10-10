@@ -1,0 +1,26 @@
+# -*- mode: Perl -*-
+#
+# [Reaper] Raise LaTeXML's hard-wired 100-error cap.
+#
+# LaTeXML stops the whole conversion once more than 100 *non-fatal* errors have
+# been reported (lib/LaTeXML/Common/Error.pm — "Note that '100' is hardwired
+# into TeX, The Program!!!"). That cap is not a command-line option; it is a
+# state value (MAX_ERRORS), so the only supported way to change it is code that
+# runs inside the conversion — i.e. a binding like this one, loaded with
+# `--preload` (the same mechanism ar5ivist itself uses for ar5iv.sty).
+#
+# Why we raise it: error-laden documents are common and usually still convert
+# fine. Without this, a paper whose LaTeX produces >100 errors (e.g. Qcircuit /
+# Xy-pic diagrams, which emit one error per subscript) aborts and LaTeXML writes
+# an empty stub instead of a document. See src/ingestion/README.md.
+#
+# The value comes from the REAPER_MAX_ERRORS environment variable (0/absent =
+# leave LaTeXML's default behaviour untouched).
+
+use LaTeXML::Package;
+
+my $reaper_max = $ENV{'REAPER_MAX_ERRORS'};
+AssignValue('MAX_ERRORS', $reaper_max, 'global')
+  if defined $reaper_max && $reaper_max =~ /^[0-9]+$/ && $reaper_max > 0;
+
+1;

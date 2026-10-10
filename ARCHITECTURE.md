@@ -172,6 +172,7 @@ MathML→LaTeX 语义转换。
   "translator": {"concurrency": 3},
   "sources":  [{"type": "arxiv_html"}, {"type": "ar5iv"}, {"type": "ar5ivist_docker"}],
   "ar5ivist_docker_image": "latexml/ar5ivist:2512.17",
+  "ar5ivist_max_errors": 100000,
   "chat":     {"idle_timeout": 900, "tools": "read,grep,find,ls",
                "pi_bin": "pi", "allow_remote": false,
                "model": null, "thinking": null}
@@ -181,6 +182,9 @@ MathML→LaTeX 语义转换。
 - `api.max_tokens` 必须覆盖推理 token（推理模型的 reasoning 也算在内）。
 - `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
 - `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
+- `ar5ivist_max_errors` 抬高 LaTeXML 的错误上限（默认 100000，0 = 保持上游默认 100）：
+  通过仓库自带的 binding `src/ingestion/ar5ivist_bindings/reaper-maxerrors.ltxml`
+  以 `--preload` 注入，不修改论文源码。
 - `chat.extensions` 不写时自动加载 `pi-extensions/reaper-tree.ts`（绝对路径）；
   手动配置时**必须是绝对路径**（pi 的 cwd 是 workspace，相对路径会失效）。
 - `translator.concurrency` 是**全局**翻译线程池大小，所有论文共享。

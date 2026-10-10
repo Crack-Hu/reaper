@@ -9,6 +9,9 @@ import threading
 from pathlib import Path
 from .. import config, logbook as _logbook
 
+# 随程序分发的 LaTeXML bindings（只读挂载进 ar5ivist 容器）
+BINDINGS_DIR = Path(__file__).parent / "ar5ivist_bindings"
+
 
 class SourceError(Exception):
     """HTML 来源不可用（单个来源失败，继续尝试下一个）。"""
@@ -212,10 +215,21 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
             "-v", f"{output_dir}:/output",
             "-w", "/source",
             "--user", f"{os.getuid()}:{os.getgid()}",
+        ]
+        # 抬高 LaTeXML 的 100 错误上限：多数"错误很多"的论文本来就能转换完，
+        # 只有撞上这个硬上限才会中止并写出空壳。binding 是只读挂载的仓库资产。
+        if config.AR5IVIST_MAX_ERRORS > 0:
+            cmd += [
+                "-v", f"{BINDINGS_DIR}:/reaper-bindings:ro",
+                "-e", f"REAPER_MAX_ERRORS={config.AR5IVIST_MAX_ERRORS}",
+            ]
+        cmd += [
             config.AR5IVIST_DOCKER_IMAGE,
             "--source", main_tex.name,
             "--destination", f"/output/{arxiv_id}.html",
         ]
+        if config.AR5IVIST_MAX_ERRORS > 0:
+            cmd += ["--path=/reaper-bindings", "--preload=reaper-maxerrors.ltxml"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
         last_line = [""]

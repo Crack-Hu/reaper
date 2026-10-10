@@ -33,9 +33,9 @@ arXiv / ar5iv 的 HTML 是 LaTeXML 转换 LaTeX 源码的产物，**转换不总
 
 - **模板样张**：投稿里混有期刊模板（如 `cas-sc-template.tex` 与真正的 `main.tex`
   并存）时，转换器可能挑错文件，返回模板样张（案例 `2111.05176`）。
-- **空壳页**：LaTeXML 撞上硬编码的 100 错误上限（`Fatal:too_many_errors`）后
-  仍会写出一个 HTML，但内容是空的（无标题、无章节）。最常见的触发者是
-  **qcircuit / Xy-pic 电路图**（`\Qcircuit` 体内的每个 `_`/`^` 都是一个错误）。
+- **空壳页**：LaTeXML 有硬编码的 100 错误上限（`Fatal:too_many_errors`），
+  超出即**中止整篇转换**、写出一个空 HTML。最常见的触发者是 **qcircuit /
+  Xy-pic 电路图**（`\Qcircuit` 体内的每个 `_`/`^` 都是一个错误）。
 
 **Reaper 不做内容嗅探**（特征防不完，也不优雅）：拿到什么就用什么。
 遇到这类论文，由用户显式换来源——直接指定本地 Docker 编译：
@@ -50,8 +50,14 @@ curl 'http://localhost:16625/api/generate?arxiv_id=2111.05176&source=ar5ivist_do
 
 前提：本机 Docker 在运行、镜像已拉取（`config.ar5ivist_docker_image`，如
 `latexml/ar5ivist:2512.17`）；编译**没有超时**，大论文可能跑很久，进度看
-`source/ar5ivist.log`。若 LaTeXML 因错误过多而失败，可先用
-`tools/fix_latexml_source.py` 压低错误数（见 `tools/README.md`）。
+`source/ar5ivist.log`。
+
+**对第二种情况，Reaper 在编译侧做了通用处理**：`ar5ivist_docker` 会把仓库自带的
+binding `src/ingestion/ar5ivist_bindings/reaper-maxerrors.ltxml` 只读挂载进容器，
+并用 `--preload` 加载它，把 LaTeXML 的错误上限抬高（`config.ar5ivist_max_errors`，
+默认 100000，设 0 则保持原样）。理由：错误很多的文档往往照样能转换完，只是被这个
+硬上限中止了——提高上限让它像平时一样"带错跑完"，而不是去改论文的源码。
+`MAX_ERRORS` 不是命令行选项而是 LaTeXML 的内部状态值，所以只能用 binding 设置。
 
 ## 解析（parser.py）
 

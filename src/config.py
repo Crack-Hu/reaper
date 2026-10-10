@@ -31,6 +31,10 @@ SOURCES = cfg.get("sources", [
 ])
 
 AR5IVIST_DOCKER_IMAGE = cfg.get("ar5ivist_docker_image", "latexml/ar5ivist:2512.17")
+
+# LaTeXML 硬编码 100 个错误就中止整篇转换（Fatal:too_many_errors），而错误多的
+# 文档往往照样能转换。这里通过 --preload 的 binding 把上限抬高（0 = 不改）。
+AR5IVIST_MAX_ERRORS = int(cfg.get("ar5ivist_max_errors", 100000))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
 LLM_API_KEY = api_cfg.get("key", "")

@@ -212,8 +212,12 @@ bash zotero-plugin/setup.sh
   上限 → 空壳页）。**Reaper 不做内容嗅探**：由用户显式换来源，例如
   `source=ar5ivist_docker` 本地编译（命令见 `src/ingestion/README.md`）。
 - `ar5ivist_docker` 依赖本机 Docker + 镜像（`docker pull` 一次）；编译**没有超时**，
-  慢论文可能很久，日志在 `source/ar5ivist.log`。qcircuit 类论文可先用
-  `python3 tools/fix_latexml_source.py <source_dir> --apply` 压低错误数。
+  慢论文可能很久，日志在 `source/ar5ivist.log`。
+- LaTeXML 有硬编码的 **100 错误上限**（`Fatal:too_many_errors`，仿 TeX，且**没有
+  命令行开关**——它是内部状态值 `MAX_ERRORS`）。`ar5ivist_docker` 用仓库自带的
+  binding（`src/ingestion/ar5ivist_bindings/reaper-maxerrors.ltxml`）+ `--preload`
+  把它抬高（`config.ar5ivist_max_errors`，默认 100000，0 = 关），让"错误多但能转换"
+  的论文照常出结果（案例 `2111.05176`）。**不要去改论文源码**。
 - `_try_ar5ivist_docker` 曾因重构漏改常量名（`AR5IVIST_DOCKER_IMAGE` 缺 `config.`
   前缀）而 100% 抛 NameError（已修）；改动 fetcher 后请跑
   `python3 -m compileall -q src` 与来源链冒烟（`python3 main.py <id>`）。
