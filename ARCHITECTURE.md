@@ -174,6 +174,7 @@ MathML→LaTeX 语义转换。
   "ar5ivist_docker_image": "latexml/ar5ivist:2512.17",
   "ar5ivist_max_errors": 100000,
   "ar5ivist_xypic_stub": true,
+  "ar5ivist_render_diagrams": true,
   "chat":     {"idle_timeout": 900, "tools": "read,grep,find,ls",
                "pi_bin": "pi", "allow_remote": false,
                "model": null, "thinking": null}
@@ -184,7 +185,8 @@ MathML→LaTeX 语义转换。
 - `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
 - `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
 - `ar5ivist_max_errors` 抬高 LaTeXML 的错误上限（默认 100000，0 = 保持上游默认 100）；
-  `ar5ivist_xypic_stub` 让 Xy-pic/Qcircuit 图表不再吞掉后续内容（默认开）。两者都通过
+  `ar5ivist_xypic_stub` 让 Xy-pic/Qcircuit 图表不再吞掉后续内容（默认开），
+  `ar5ivist_render_diagrams` 再用真 LaTeX 把这些图渲染成 SVG 插回（默认开）。两者都通过
   仓库自带的 bindings（`src/ingestion/ar5ivist_bindings/`）以 `--preload` 注入，
   **不修改论文源码**。
 - `chat.extensions` 不写时自动加载 `pi-extensions/reaper-tree.ts`（绝对路径）；

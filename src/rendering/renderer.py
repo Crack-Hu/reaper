@@ -208,11 +208,22 @@ def _process_resources(html: str, fp: "FetchedPage",
         local_path = None
         try:
             raw = None
-            if source_type == "ar5ivist_docker" or img_dir.exists():
-                fname = url.split("/")[-1] if "/" in url else url
-                local = img_dir / fname
-                if local.exists():
-                    raw = local.read_bytes()
+            if (source_type == "ar5ivist_docker" or img_dir.exists()) \
+                    and not url.startswith(("http:", "https:", "data:")):
+                # Local resource: try the path as written first (that is how
+                # rescued diagrams are referenced: reaper-diagrams/d0.svg),
+                # then the historical "flattened filename" lookup.
+                names = [url] + ([url.split("/")[-1]] if "/" in url else [])
+                for name in names:
+                    local = (img_dir / name)
+                    try:
+                        local = local.resolve()
+                        local.relative_to(img_dir.resolve())     # stay inside
+                    except (OSError, ValueError):
+                        continue
+                    if local.is_file():
+                        raw = local.read_bytes()
+                        break
             if raw is None and resource_dir:
                 full_url = cdn_url
                 raw = _fetch(full_url, referer=fp.page_url)

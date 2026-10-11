@@ -12,6 +12,9 @@ from .. import config, logbook as _logbook
 # 随程序分发的 LaTeXML bindings（只读挂载进 ar5ivist 容器）
 BINDINGS_DIR = Path(__file__).parent / "ar5ivist_bindings"
 
+# 图救援（把 LaTeXML 画不了的图用真 LaTeX 渲染成 SVG）的单次编译上限
+RESCUE_TIMEOUT = 600.0
+
 
 class SourceError(Exception):
     """HTML 来源不可用（单个来源失败，继续尝试下一个）。"""
@@ -191,6 +194,45 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
     return main_tex
 
 
+def _rescue_diagrams(source_dir: Path, main_name: str, output_dir: Path,
+                     arxiv_id: str) -> None:
+    """Render unsupported diagrams with the container's real LaTeX toolchain.
+
+    `diagram_rescue` prepares one small document per diagram plus placeholders;
+    this runs the container once to turn them into SVGs (see that module for the
+    whole design). Failures are non-fatal — the placeholder stays.
+    """
+    from . import diagram_rescue as rescue
+
+    report = rescue.prepare(source_dir, main_name)
+    if not report.count:
+        return
+    print(f"          rendering {report.count} diagram(s) with LaTeX ...", flush=True)
+    log_path = output_dir / "reaper-diagrams-compile.log"
+    cmd = [
+        "docker", "run", "--rm", "--entrypoint", "sh",
+        "-v", f"{source_dir}:/source",
+        "-w", "/source",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        config.AR5IVIST_DOCKER_IMAGE,
+        "-c", rescue.compile_script(),
+    ]
+    try:
+        with open(log_path, "w") as log_f:
+            subprocess.run(cmd, stdout=log_f, stderr=subprocess.STDOUT,
+                           timeout=RESCUE_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        print(f"          diagram rendering timed out after {RESCUE_TIMEOUT}s"
+              f" — keeping placeholders", flush=True)
+    except Exception as e:                      # docker missing, etc.
+        print(f"          diagram rendering failed ({e}) — keeping placeholders",
+              flush=True)
+
+    compiled, failed = rescue.verify(source_dir)
+    print(f"          diagrams: {compiled}/{report.count} rendered"
+          + (f", {len(failed)} kept as placeholder" if failed else ""), flush=True)
+
+
 def _try_ar5ivist_docker(arxiv_id: str) -> str:
     """用 ar5ivist Docker 转换 LaTeX → HTML。
 
@@ -202,6 +244,13 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
     # Step 1: Download source
     print(f"          downloading source for {arxiv_id} ...", flush=True)
     main_tex = _download_arxiv_source(arxiv_id, source_dir)
+
+    # Step 1b: render the diagrams LaTeXML cannot handle (Xy-pic/Qcircuit …)
+    # with the real TeX Live that ships in the same image, so the binding can
+    # include them instead of dropping them. Purely additive: when nothing is
+    # found, or the render fails, the diagram falls back to a placeholder.
+    if config.AR5IVIST_RENDER_DIAGRAMS and config.AR5IVIST_XYPIC_STUB:
+        _rescue_diagrams(source_dir, main_tex.name, output_dir, arxiv_id)
 
     # Step 2: Run Docker
     log_path = output_dir / "ar5ivist.log"

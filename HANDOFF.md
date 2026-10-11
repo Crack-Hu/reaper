@@ -219,6 +219,9 @@ bash zotero-plugin/setup.sh
   （`src/ingestion/ar5ivist_bindings/`，随程序分发、只读挂载、`--preload` 注入）：
   `reaper-qcircuit.sty` 把 `\xymatrix` 换成吞图表的宏（`ar5ivist_xypic_stub`），
   `reaper-maxerrors.ltxml` 抬高硬编码的 100 错误上限（`ar5ivist_max_errors`）。
+  被吞掉的图会由**图救援**补回来：`diagram_rescue.py` 按 `\input` 顺序抽出图表片段，
+  用容器里的真 LaTeX（`latex`+`dvisvgm`）渲染成 SVG，binding 再 `\includegraphics`
+  插回 HTML（`ar5ivist_render_diagrams`，编译失败自动回退占位符）。
   **不要去改论文源码**——作者源码没问题（真 LaTeX 能编出 154 页 PDF）。
 - `_try_ar5ivist_docker` 曾因重构漏改常量名（`AR5IVIST_DOCKER_IMAGE` 缺 `config.`
   前缀）而 100% 抛 NameError（已修）；改动 fetcher 后请跑

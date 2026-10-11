@@ -54,17 +54,18 @@ curl 'http://localhost:16625/api/generate?arxiv_id=2111.05176&source=ar5ivist_do
 `latexml/ar5ivist:2512.17`）；编译**没有超时**，大论文可能跑很久，进度看
 `source/ar5ivist.log`。
 
-**编译侧的两个预设**（`src/ingestion/ar5ivist_bindings/`，随程序分发、只读挂载、
+**编译侧的处理**（`src/ingestion/ar5ivist_bindings/`，随程序分发、只读挂载、
 `--preload` 注入，**不修改论文源码**）：
 
-| binding | 作用 | 开关 |
+| 组件 | 作用 | 开关 |
 |---|---|---|
-| `reaper-qcircuit.sty` | 把 `\xymatrix` 换成"跳过选项、吞掉图表体、留占位符"的宏，图表不再破坏后续内容 | `ar5ivist_xypic_stub`（默认开） |
+| `reaper-qcircuit.sty` | 把 `\xymatrix` 换成"跳过选项、吞掉图表体"的宏：有救援图就插图，否则 `[diagram omitted]` 占位符 | `ar5ivist_xypic_stub`（默认开） |
 | `reaper-maxerrors.ltxml` | 抬高 LaTeXML 的 100 错误上限 | `ar5ivist_max_errors`（默认 100000，0 = 关） |
+| `diagram_rescue.py`（宿主）+ 容器里的 `latex`/`dvisvgm` | **图救援**：把画不了的图用真 LaTeX 渲染成 SVG，再插回 HTML | `ar5ivist_render_diagrams`（默认开） |
 
-注意二者解决的问题不同：**光抬高上限不够**——它只让 LaTeXML 别中止，被 Xy-pic
-破坏的解析照样静默丢内容；真正解决问题的是 qcircuit stub。代价是 Xy-pic 图表在
-HTML 里显示为 `[diagram omitted]`（要图请看 PDF）。详见该目录的 `README.md`。
+注意：**光抬高上限不够**——它只让 LaTeXML 别中止，被 Xy-pic 破坏的解析照样静默
+丢内容；真正解决问题的是 qcircuit stub，而图救援把丢弃的图找回来。详见该目录的
+`README.md`。
 
 ## 解析（parser.py）
 

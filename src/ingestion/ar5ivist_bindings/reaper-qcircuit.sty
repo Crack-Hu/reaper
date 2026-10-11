@@ -7,28 +7,52 @@
 % matrices: every `_`/`^` inside a diagram is reported as "Script ... can only
 % appear in math mode" (one error per subscript), and the malformed alignment
 % then *swallows the rest of the document* — the output simply stops at the
-% first diagram. Reproduced with arXiv:2111.05176: sections 8-10, the
-% bibliography and all appendices were missing, even though LaTeXML reported a
-% completed conversion (Status:conversion:2).
+% first diagram. Reproduced with arXiv:2111.05176.
 %
-% Fix, without touching the paper's sources: override `\xymatrix` so that it
-% skips the Xy-pic option tokens and swallows the diagram body, leaving a short
-% placeholder. Loaded with `--preload`, so `\AtBeginDocument` runs *after* the
-% real packages defined `\xymatrix`, and our definition wins.
+% What this does, for each diagram (in document order):
 %
-% Trade-off: Xy-pic diagrams are dropped (LaTeXML cannot render them anyway).
-% Disable with `"ar5ivist_xypic_stub": false` in config.json.
+%   reaper-diagrams/d<N>.svg exists  -> \includegraphics it
+%   otherwise                        -> \mbox{[diagram omitted]}
+%
+% The SVGs are produced by `src/ingestion/diagram_rescue.py`: it writes one
+% small document per diagram (the paper's own preamble + the snippet), and the
+% container's real TeX Live renders them (`latex` + `dvisvgm`). The count file
+% is written by the same step; without it every diagram falls back to the
+% placeholder, so this file is harmless on its own.
+%
+% Loaded with `--preload`, so `\AtBeginDocument` runs *after* the real packages
+% defined `\xymatrix`, and our definition wins. Nothing here reads the
+% converted content: numbering is the only coupling with the rescue step, and
+% both walk the sources in `\input` order.
+%
+% Disable with `"ar5ivist_xypic_stub": false` (placeholders only) or
+% `"ar5ivist_render_diagrams": false` (no rescue step) in config.json.
 
 \NeedsTeXFormat{LaTeX2e}
 \ProvidesPackage{reaper-qcircuit}[2026/10/10 Reaper: neutralize Xy-pic diagrams for LaTeXML]
 
+\RequirePackage{graphicx}
+
 \makeatletter
+\newcount\reaperDiagramNo
+\reaperDiagramNo=0
+\def\reaperDiagramCount{0}
+\InputIfFileExists{reaper-diagrams/count.tex}{}{}
+
 % Skip option tokens (`@C=1em`, `@R=.7em`, `@*=<0em>`, `@!R`, ...) until the
-% begin-group token, then swallow the braced diagram body.
+% begin-group token, then deal with the braced diagram body.
 \def\reaperSkipDiagram{%
   \@ifnextchar\bgroup{\reaperEatDiagram}{\reaperSkipDiagramI}}
 \def\reaperSkipDiagramI#1{\reaperSkipDiagram}
-\long\def\reaperEatDiagram#1{\mbox{[diagram omitted]}}
+\long\def\reaperEatDiagram#1{%
+  \ifnum\reaperDiagramNo<\reaperDiagramCount
+    \edef\reaperDiagramFile{reaper-diagrams/d\the\reaperDiagramNo.svg}%
+    \global\advance\reaperDiagramNo by 1
+    \includegraphics{\reaperDiagramFile}%
+  \else
+    \global\advance\reaperDiagramNo by 1
+    \mbox{[diagram omitted]}%
+  \fi}
 
 \AtBeginDocument{\let\xymatrix\reaperSkipDiagram}
 \makeatother

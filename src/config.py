@@ -39,6 +39,10 @@ AR5IVIST_MAX_ERRORS = int(cfg.get("ar5ivist_max_errors", 100000))
 # LaTeXML 画不了 Xy-pic/Qcircuit 图表，而且会因此吞掉图表之后的全部内容。
 # 开启后用一个 binding 把 \xymatrix 换成"跳过选项、吞掉图表体"的宏（不改论文源码）。
 AR5IVIST_XYPIC_STUB = bool(cfg.get("ar5ivist_xypic_stub", True))
+
+# LaTeXML 画不了的图（Xy-pic/Qcircuit…），用容器里的真 LaTeX 渲染成 SVG 再插回
+# （见 src/ingestion/diagram_rescue.py）。关闭则只留 [diagram omitted] 占位符。
+AR5IVIST_RENDER_DIAGRAMS = bool(cfg.get("ar5ivist_render_diagrams", True))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
 LLM_API_KEY = api_cfg.get("key", "")
