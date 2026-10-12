@@ -75,7 +75,8 @@ render_bilingual_html(marked_html, blocks_with_zh, fp)  src/rendering/renderer.p
 1. **保留 ar5iv 原生 CSS**：公式/表格/图注由 LaTeXML 渲染，自写 CSS 无法覆盖全部边缘情况；只做增量覆盖。
 2. **按章节翻译**：LLM 看到完整章节上下文；超长节在段落边界平衡拆分。
 3. **编号对齐**：`REAPER_PARA_N` 按编号匹配，LLM 少输出/合并输出也不错位。
-4. **PaperCache v2**：一个文件同时存 HTML hash、blocks、译文，`merge_translations` 后立即落盘；
+4. **PaperCache v3**：一个文件同时存 HTML hash、blocks 和**跨文档的译文库**
+   （`translations`，按段落文本哈希），换来源不会丢译文；`merge_translations` 后立即落盘；
    崩溃不会留下「0 翻译」的缓存。
 5. **画布包裹**：所有来源正文都在 `<div class="reaper-content">` 内，TOC/工具栏在画布外。
 6. **三来源统一**：都产自 LaTeXML，类名体系一致；arxiv_html 保留原生 TOC 只改锚点，其余由 blocks 生成 TOC。
@@ -199,7 +200,7 @@ MathML→LaTeX 语义转换。
 | 数据 | 位置 | 生产者 → 消费者 |
 |---|---|---|
 | 原始 HTML + 图片 | `papers/{id}/source/` | fetcher → parser/renderer/context |
-| PaperCache v2 | `papers/{id}/process/translation_cache/cache.json` | translator ↔ server |
+| PaperCache v3（blocks + 跨文档译文库） | `papers/{id}/process/translation_cache/cache.json` | translator ↔ server |
 | Task 状态 | `papers/{id}/process/state.json` | task.py ↔ server |
 | 双语 HTML | `papers/{id}/process/reaper_html/`（强制来源时 `reaper_html_<src>/`） | renderer → Zotero 插件 |
 | 救援图（LaTeXML 画不了的图，真 LaTeX 渲染的 SVG + 小文档） | `papers/{id}/process/reaper-diagrams/` | diagram_rescue.py（宿主准备）→ 容器 latex+dvisvgm → binding `\includegraphics` → renderer 收进 assets |

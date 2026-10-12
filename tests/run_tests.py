@@ -159,7 +159,7 @@ class TestPaperCacheV2(unittest.TestCase):
         self.assertEqual(matched[0]["zh"], "KEPT")
 
     def test_v1_legacy_migration(self):
-        """V1 flat {hash: zh} dict is migrated to V2 on update()."""
+        """V1 flat {hash: zh} dict is migrated to the current format on update()."""
         import json
         from src.translation.cache import PaperCache, _hash
 
@@ -176,9 +176,46 @@ class TestPaperCacheV2(unittest.TestCase):
         pc.update("<html>migration test</html>", "arxiv_html",
                   _mk_blocks("old text", "new text"))
 
-        self.assertEqual(pc.version, 2)          # upgraded on update
+        self.assertGreaterEqual(pc.version, 2)   # upgraded on update (目前是 3)
         self.assertEqual(pc.blocks[0]["zh"], "旧译文")   # carried over by hash
         self.assertFalse(pc.blocks[1].get("zh"))         # new block, no translation
+        self.assertEqual(pc.get_zh("old text"), "旧译文")  # 也在跨文档的译文库里
+
+    def test_translations_survive_a_different_document(self):
+        """换来源/换 HTML 不会丢译文（v3 的 translations 库；见 2111.05176 事故）。"""
+        from src.translation.cache import PaperCache
+        import tempfile, shutil
+        from src import config
+
+        root = tempfile.mkdtemp()
+        orig = config.translation_cache_dir
+        config.translation_cache_dir = lambda pid: root + "/" + pid
+        try:
+            class B:
+                def __init__(self, t):
+                    self.text, self.type, self.level, self.label, self.math_map = t, "para", 0, "", {}
+
+            real = [B(f"real paragraph {i} with plenty of text.") for i in range(10)]
+            other = [B(f"placeholder page line {i}.") for i in range(3)]
+
+            pc = PaperCache.load("survive")
+            pc.update("<html>real</html>", "ar5ivist_docker", real)
+            pc.merge_translations([{"zh": f"译{i}"} for i in range(10)])
+            pc.save()
+
+            # 换成另一份文档（例如误取的样张页）——旧译文必须还在
+            pc2 = PaperCache.load("survive")
+            pc2.update("<html>other</html>", "arxiv_html", other)
+            pc2.save()
+            self.assertEqual(pc2.get_zh("real paragraph 3 with plenty of text."), "译3")
+
+            # 换回来：不应再需要翻译
+            pc3 = PaperCache.load("survive")
+            pc3.update("<html>real</html>", "ar5ivist_docker", real)
+            self.assertEqual(sum(1 for b in pc3.blocks if b["zh"]), 10)
+        finally:
+            config.translation_cache_dir = orig
+            shutil.rmtree(root, ignore_errors=True)
 
 
 # ──────────────────────────────────────────────

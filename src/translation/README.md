@@ -8,7 +8,7 @@
 |---|---|
 | `translator.py` | prompt 组装、LLM 调用、章节分组/拆分、并发调度、编号对齐 |
 | `dictionary.py` | `TermDictionary`：用户术语（高优先）+ LLM 自动提取（低优先） |
-| `cache.py` | `PaperCache` v2：HTML hash + blocks + 译文，一个文件存全流程状态 |
+| `cache.py` | `PaperCache` v3：HTML hash + blocks + **跨文档的译文库**，一个文件存全流程状态 |
 
 ## 翻译流程（默认按章节）
 
@@ -50,10 +50,18 @@ data/dict/llm_terms.json    翻译时自动提取，低优先级
 
 ## 缓存（cache.py）
 
-`PaperCache` 存在 `process/translation_cache/cache.json`：
+`PaperCache` 存在 `process/translation_cache/cache.json`。译文存**两份**：
+
+- `blocks[].zh`：当前这份文档的段落（结构 + 原文 + 译文）；
+- `translations`：`{段落文本哈希: 译文}` 的**追加式译文库**——换来源、换 HTML 时
+  **不会丢**。没有它时，一次误取到别的页面（例如 arXiv 的样张占位页，74 段而不是
+  1029 段）会把 `blocks` 整个替换掉并静默丢掉几百条译文，随后正确来源的那次运行
+  只能全量重翻（`2111.05176` 真实事故）。
 
 ```json
-{"version": 2, "html_hash": "...", "src_type": "ar5iv", "blocks": [
+{"version": 3, "html_hash": "...", "src_type": "ar5iv",
+ "translations": {"<段落哈希>": "译文"},
+ "blocks": [
   {"idx": 0, "hash": "段落 sha256 前 16 位", "en": "...", "zh": "...",
    "type": "para", "level": 0, "label": "", "math_map": {}}
 ]}

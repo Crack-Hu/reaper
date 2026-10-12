@@ -5,11 +5,24 @@ both parsing AND translation can be skipped entirely.
 
 File: config.translation_cache_dir(arxiv_id)/cache.json
 
+Translations live in *two* places, on purpose:
+
+* ``blocks[].zh``        — the current document's blocks (structure + text + zh)
+* ``translations``       — an append-only ``{block_text_hash: zh}`` store
+
+The second one is what makes the cache robust: translations are keyed by the
+*paragraph text*, so they survive the document changing shape. Without it, a run
+that fetched a different (wrong) source — e.g. arXiv's "specimen" placeholder
+page, which has 74 blocks instead of 1029 — replaced ``blocks`` and silently
+threw away ~900 translations of the real paper. (Happened with 2111.05176:
+a default-order run cost a full re-translation of the 100-page review.)
+
 Structure:
 {
-  "version": 2,
+  "version": 3,
   "html_hash": "sha256 of raw HTML",
   "src_type": "ar5iv",
+  "translations": {"<block hash>": "译文", ...},
   "blocks": [
     {
       "idx": 0,
@@ -25,7 +38,8 @@ Structure:
   ]
 }
 
-Version 1 (legacy flat dict: {hash: zh}) is auto-detected and converted on load.
+Version 1 (legacy flat dict: {hash: zh}) and version 2 (translations only inside
+``blocks``) are auto-detected and migrated on load.
 """
 
 import json
@@ -36,6 +50,11 @@ from .. import config
 
 # PaperCache stores at `config.translation_cache_dir(arxiv_id) / "cache.json"`.
 # PaperCache now stores under `config.translation_cache_dir(arxiv_id) / "cache.json"`.
+
+
+# 译文库上限：只保留「当前文档用到的」+ 最近的若干条，避免无限增长
+# （一篇 100 页论文约 1000 段，2 万条 ≈ 20 篇）。
+_MAX_TRANSLATIONS = 20000
 
 
 def _hash(text: str) -> str:
@@ -63,11 +82,13 @@ class PaperCache:
     def __init__(self, arxiv_id: str):
         self.arxiv_id = arxiv_id
         self._path = Path(config.translation_cache_dir(arxiv_id)) / "cache.json"
-        self.version = 2
+        self.version = 3
         self.html_hash: str = ""
         self.src_type: str = ""
         self.blocks: list[dict] = []
-        self._by_hash: dict[str, dict] = {}  # hash → block
+        self._by_hash: dict[str, dict] = {}   # hash → block (current document)
+        # 跨文档保留的译文：{段落文本哈希: 译文}（换来源/换 HTML 都不丢）
+        self.translations: dict[str, str] = {}
         self._lock = threading.Lock()
         self._loaded = False
 
@@ -91,9 +112,10 @@ class PaperCache:
         ver = raw.get("version", 1)
 
         if ver == 1:
-            # Legacy: flat {hash: zh} dict → migrate on next save
+            # Legacy: flat {hash: zh} dict → migrate to the translations store
             self.version = 1
             self._by_hash = raw
+            self.translations = dict(raw)
             self.html_hash = ""
             self.src_type = ""
             self.blocks = []
@@ -103,16 +125,24 @@ class PaperCache:
             self.src_type = raw.get("src_type", "")
             self.blocks = raw.get("blocks", [])
             self._by_hash = {b["hash"]: b for b in self.blocks if b.get("hash")}
+            # v3 keeps translations separately; v2 only had them inside blocks
+            self.translations = {
+                b["hash"]: b["zh"] for b in self.blocks
+                if b.get("hash") and b.get("zh")
+            }
+            self.translations.update(raw.get("translations", {}))
 
     def save(self):
         with self._lock:
             self._write()
 
     def _write(self):
+        self._prune_translations()
         payload = {
-            "version": 2,
+            "version": 3,
             "html_hash": self.html_hash,
             "src_type": self.src_type,
+            "translations": self.translations,
             "blocks": self.blocks,
         }
         self._path.write_text(
@@ -146,7 +176,7 @@ class PaperCache:
         new_hash = html_hash(html)
         self.html_hash = new_hash
         self.src_type = src_type
-        self.version = 2
+        self.version = 3
         self.blocks = []
 
         for i, b in enumerate(blocks):
@@ -161,13 +191,8 @@ class PaperCache:
                 "label": b.label,
                 "math_map": b.math_map,
             }
-            # Carry over translation if block hash matches a cached block
-            if h in self._by_hash:
-                old = self._by_hash[h]
-                if isinstance(old, str):
-                    entry["zh"] = old  # v1 legacy: {hash: zh}
-                else:
-                    entry["zh"] = old.get("zh", "")
+            # 译文按段落文本哈希命中（跨文档保留，换来源也不会丢）
+            entry["zh"] = self.translations.get(h, "")
             self.blocks.append(entry)
 
         self._by_hash = {b["hash"]: b for b in self.blocks}
@@ -178,20 +203,24 @@ class PaperCache:
             if i < len(self.blocks) and t.get("zh"):
                 self.blocks[i]["zh"] = t["zh"]
         self._by_hash = {b["hash"]: b for b in self.blocks}
+        for b in self.blocks:
+            if b.get("zh"):
+                self.translations[b["hash"]] = b["zh"]
 
     # ── per-block get/put (for on-the-fly translation cache) ──
 
     def get_zh(self, text: str) -> str | None:
+        """Cache hit for a paragraph — by text hash, independent of the document."""
         h = _hash(text)
-        b = self._by_hash.get(h)
-        if b is None:
-            return None
-        if isinstance(b, str):
-            return b  # v1 legacy
-        return b.get("zh")
+        zh = self.translations.get(h)
+        if zh:
+            return zh
+        b = self._by_hash.get(h)              # v1 legacy: {hash: zh} 直接存字符串
+        return b if isinstance(b, str) and b else None
 
     def put_zh(self, text: str, zh: str):
         h = _hash(text)
+        self.translations[h] = zh
         b = self._by_hash.get(h)
         if isinstance(b, dict):
             b["zh"] = zh
@@ -214,6 +243,17 @@ class PaperCache:
             }
             self.blocks.append(entry)
             self._by_hash[h] = entry
+
+    def _prune_translations(self):
+        """Keep the store bounded: never drop what the current blocks need."""
+        if len(self.translations) <= _MAX_TRANSLATIONS:
+            return
+        keep = {b.get("hash") for b in self.blocks if isinstance(b, dict)}
+        for h in list(self.translations):          # dict 保序：先丢最旧的
+            if len(self.translations) <= _MAX_TRANSLATIONS:
+                break
+            if h not in keep:
+                del self.translations[h]
 
     # ── stats ──
 
@@ -242,20 +282,19 @@ class PaperCache:
 def load(paper_id: str) -> dict[str, str]:
     """Load translations as {hash: zh} dict (legacy compat)."""
     pc = PaperCache.load(paper_id)
-    if pc.version == 1:
-        return pc._by_hash  # already {hash: zh}
-    return {b["hash"]: b["zh"] for b in pc.blocks if b.get("zh")}
+    if pc.translations:
+        return dict(pc.translations)
+    return pc._by_hash if pc.version == 1 else {}
 
 
 def save(paper_id: str, cache: dict[str, str]):
     """Save translations as {hash: zh} dict (legacy compat)."""
     pc = PaperCache.load(paper_id)
-    if pc.version == 1:
-        pc._by_hash = cache
-    else:
-        for h, zh in cache.items():
-            if h in pc._by_hash:
-                pc._by_hash[h]["zh"] = zh
+    pc.translations.update(cache)
+    for h, zh in cache.items():
+        b = pc._by_hash.get(h)
+        if isinstance(b, dict):
+            b["zh"] = zh
     pc.save()
 
 
