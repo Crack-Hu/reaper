@@ -66,6 +66,7 @@ translate_blocks(blocks, cache=PaperCache)  src/translation/translator.py
 render_bilingual_html(marked_html, blocks_with_zh, fp)  src/rendering/renderer.py
   ├─ 7 步注入：来源清洗 → ar5iv CSS 内嵌 → 资源处理 → TOC → 页脚
   │            → 译文 → 元数据/来源开关 JS
+  ├─ 图救援（可选）：process/reaper-diagrams/dN.svg（真 LaTeX 渲染，见 §4 下方说明）
   └─ 输出 data/papers/X/process/reaper_html/index.html(+assets/)
 ```
 
@@ -200,7 +201,8 @@ MathML→LaTeX 语义转换。
 | 原始 HTML + 图片 | `papers/{id}/source/` | fetcher → parser/renderer/context |
 | PaperCache v2 | `papers/{id}/process/translation_cache/cache.json` | translator ↔ server |
 | Task 状态 | `papers/{id}/process/state.json` | task.py ↔ server |
-| 双语 HTML | `papers/{id}/process/reaper_html/` | renderer → Zotero 插件 |
+| 双语 HTML | `papers/{id}/process/reaper_html/`（强制来源时 `reaper_html_<src>/`） | renderer → Zotero 插件 |
+| 救援图（LaTeXML 画不了的图，真 LaTeX 渲染的 SVG + 小文档） | `papers/{id}/process/reaper-diagrams/` | diagram_rescue.py（宿主准备）→ 容器 latex+dvisvgm → binding `\includegraphics` → renderer 收进 assets |
 | agent workspace | `papers/{id}/chat/workspace/` | context.py → pi |
 | pi 会话 | `papers/{id}/chat/sessions/*.jsonl` | pi（唯一写者）→ session.py（只读索引） |
 | 术语表 | `dict/user_terms.json` + `dict/llm_terms.json` | dictionary.py（读-合并-写 + 原子替换） |

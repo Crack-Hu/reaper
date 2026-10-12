@@ -13,12 +13,13 @@ How
 The ar5ivist image ships a full TeX Live, so the *same container* can render the
 diagrams with real LaTeX. Three steps, each in a different place:
 
-======================  =======================================================
-host (this module)      walk the paper's sources, write one tiny document per
-                        diagram: the paper's own preamble + the snippet
-docker (compile_script) ``latex`` + ``dvisvgm`` turn each document into SVG
-converter (binding)     replaces construct N with ``\\includegraphics{dN.svg}``
-======================  =======================================================
+========================  =====================================================
+host (this module)        walk the paper's sources, write one tiny document per
+                          diagram (the paper's own preamble + the snippet) plus
+                          placeholders into ``process/reaper-diagrams``
+docker (compile_script)   ``latex`` + ``dvisvgm`` turn each document into SVG
+converter (binding)       replaces construct N with ``\\includegraphics{dN.svg}``
+========================  =====================================================
 
 The numbering is the only coupling between host and converter, and both walk the
 sources in the same order (``\\input`` order). Nothing inspects the *content* of
@@ -41,6 +42,9 @@ from pathlib import Path
 # expands to) and, in the same family, other TeX-programmed drawing constructs.
 CONSTRUCTS: tuple[str, ...] = ("Qcircuit", "xymatrix")
 
+# 救援产物在容器里的相对路径（= 相对文档目录）。宿主上它在
+# `config.diagrams_dir()`（`data/papers/{id}/process/reaper-diagrams`），
+# 由 fetcher 嵌套挂载到 `/source/reaper-diagrams`。
 DIAGRAM_DIR = "reaper-diagrams"
 PLACEHOLDER_MARK = "reaper-diagram-placeholder"
 
@@ -207,19 +211,16 @@ _PLACEHOLDER_SVG = """<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
-def diagram_dir(source_dir: Path) -> Path:
-    return Path(source_dir) / DIAGRAM_DIR
-
-
-def prepare(source_dir: Path, main_name: str = "main.tex") -> RescueReport:
+def prepare(source_dir: Path, out_dir: Path, main_name: str = "main.tex") -> RescueReport:
     """Write one document per diagram, plus placeholders, count and index.
 
     Placeholders are written for *every* index up front, so the converter can
     always reference ``dN.svg``; the container run overwrites the ones that
-    compile. Call :func:`verify` afterwards to count the real ones.
+    compile. Call :func:`verify` afterwards (with the same `out_dir`) to count
+    the real ones.
     """
     source_dir = Path(source_dir).resolve()
-    out = diagram_dir(source_dir)
+    out = Path(out_dir)
     docs = out / "src"
     work = out / "work"
     for d in (docs, work):
@@ -278,9 +279,9 @@ def compile_script() -> str:
     )
 
 
-def verify(source_dir: Path) -> tuple[int, list[str]]:
+def verify(out_dir: Path) -> tuple[int, list[str]]:
     """Count real (non-placeholder) SVGs; returns ``(compiled, failed_names)``."""
-    out = diagram_dir(source_dir)
+    out = Path(out_dir)
     compiled, failed = 0, []
     for svg in sorted(out.glob("d*.svg")):
         try:
@@ -295,6 +296,6 @@ def verify(source_dir: Path) -> tuple[int, list[str]]:
     return compiled, failed
 
 
-def cleanup(source_dir: Path) -> None:
+def cleanup(out_dir: Path) -> None:
     """Remove everything :func:`prepare` created (used by tests / --no-rescue)."""
-    shutil.rmtree(diagram_dir(source_dir), ignore_errors=True)
+    shutil.rmtree(Path(out_dir), ignore_errors=True)

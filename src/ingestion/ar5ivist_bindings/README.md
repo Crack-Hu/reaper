@@ -20,13 +20,19 @@ TeX Live，所以"用真 LaTeX 画图"和"用 LaTeXML 转 HTML"能一次做完�
 ```
 ① 宿主（src/ingestion/diagram_rescue.py）
      walk 论文源码（跟随 \input 顺序）→ 每个 \Qcircuit/\xymatrix 写成一个小文档：
-     「论文自己的 preamble + preview + 该片段」→ reaper-diagrams/src/dN.tex
+     「论文自己的 preamble + preview + 该片段」
+     → data/papers/{id}/process/reaper-diagrams/src/dN.tex（不进 source/）
      同时给每个编号写占位 SVG、count.tex(\def\reaperDiagramCount{N})、index.json
 ② 容器（diagram_rescue.compile_script()，docker run --entrypoint sh）
-     latex → dvisvgm --no-fonts → 覆盖成 reaper-diagrams/dN.svg
+     latex → dvisvgm --no-fonts → 覆盖成 dN.svg
+     该目录被**嵌套挂载**到容器的 /source/reaper-diagrams（转换器只能按"相对
+     文档目录"找文件，而宿主上它是 process/ 下的派生产物）
 ③ 转换（本目录的 binding）
      第 N 个图 → \includegraphics{reaper-diagrams/dN.svg}；文件不存在 → 占位符
 ```
+
+（主转换容器也会挂载同一目录，binding 才能读到 count.tex 与 dN.svg；
+renderer 会把这些图收进最终 HTML 的 `assets/`。）
 
 要点：
 

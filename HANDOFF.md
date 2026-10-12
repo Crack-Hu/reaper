@@ -128,7 +128,8 @@ data/
 │   ├── process/
 │   │   ├── translation_cache/cache.json   PaperCache v2（HTML hash + 分段译文）
 │   │   ├── state.json                     Task 状态（断点续传）
-│   │   └── reaper_html/index.html(+assets/)  最终双语 HTML
+│   │   ├── reaper_html/index.html(+assets/)  最终双语 HTML
+│   │   └── reaper-diagrams/              救援图：dN.svg + 小文档（真 LaTeX 渲染）
 │   └── chat/
 │       ├── workspace/              agent 上下文：paper.md / blocks.json / OUTLINE.md / metadata.json
 │       └── sessions/*.jsonl        pi 会话文件（对话历史本体）
@@ -220,8 +221,9 @@ bash zotero-plugin/setup.sh
   `reaper-qcircuit.sty` 把 `\xymatrix` 换成吞图表的宏（`ar5ivist_xypic_stub`），
   `reaper-maxerrors.ltxml` 抬高硬编码的 100 错误上限（`ar5ivist_max_errors`）。
   被吞掉的图会由**图救援**补回来：`diagram_rescue.py` 按 `\input` 顺序抽出图表片段，
-  用容器里的真 LaTeX（`latex`+`dvisvgm`）渲染成 SVG，binding 再 `\includegraphics`
-  插回 HTML（`ar5ivist_render_diagrams`，编译失败自动回退占位符）。
+  写到 `process/reaper-diagrams/`（派生文件不进 `source/`），用容器里的真 LaTeX
+  （`latex`+`dvisvgm`）渲染成 `dN.svg`，binding 再 `\includegraphics` 插回 HTML，
+  renderer 收进 `assets/`（`ar5ivist_render_diagrams`，编译失败自动回退占位符）。
   **不要去改论文源码**——作者源码没问题（真 LaTeX 能编出 154 页 PDF）。
 - `_try_ar5ivist_docker` 曾因重构漏改常量名（`AR5IVIST_DOCKER_IMAGE` 缺 `config.`
   前缀）而 100% 抛 NameError（已修）；改动 fetcher 后请跑

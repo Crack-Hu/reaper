@@ -15,6 +15,9 @@ BINDINGS_DIR = Path(__file__).parent / "ar5ivist_bindings"
 # 图救援（把 LaTeXML 画不了的图用真 LaTeX 渲染成 SVG）的单次编译上限
 RESCUE_TIMEOUT = 600.0
 
+# 救援产物在容器里的路径（= 相对文档目录），与 diagram_rescue.DIAGRAM_DIR 一致
+DIAGRAM_DIR_NAME = "reaper-diagrams"
+
 
 class SourceError(Exception):
     """HTML 来源不可用（单个来源失败，继续尝试下一个）。"""
@@ -194,17 +197,21 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
     return main_tex
 
 
-def _rescue_diagrams(source_dir: Path, main_name: str, output_dir: Path,
-                     arxiv_id: str) -> None:
+def _rescue_diagrams(source_dir: Path, diagrams_dir: Path, main_name: str,
+                     output_dir: Path) -> None:
     """Render unsupported diagrams with the container's real LaTeX toolchain.
 
-    `diagram_rescue` prepares one small document per diagram plus placeholders;
-    this runs the container once to turn them into SVGs (see that module for the
-    whole design). Failures are non-fatal — the placeholder stays.
+    `diagram_rescue` prepares one small document per diagram in
+    `config.diagrams_dir()` (`process/reaper-diagrams`, *not* next to the paper's
+    sources); this runs the container once to turn them into SVGs. The directory
+    is mounted at `/source/reaper-diagrams` so the converter — which resolves
+    paths relative to the document directory — finds them where it expects.
+
+    Failures are non-fatal: the placeholder stays, the article stays complete.
     """
     from . import diagram_rescue as rescue
 
-    report = rescue.prepare(source_dir, main_name)
+    report = rescue.prepare(source_dir, diagrams_dir, main_name)
     if not report.count:
         return
     print(f"          rendering {report.count} diagram(s) with LaTeX ...", flush=True)
@@ -212,6 +219,7 @@ def _rescue_diagrams(source_dir: Path, main_name: str, output_dir: Path,
     cmd = [
         "docker", "run", "--rm", "--entrypoint", "sh",
         "-v", f"{source_dir}:/source",
+        "-v", f"{diagrams_dir}:/source/{rescue.DIAGRAM_DIR}",
         "-w", "/source",
         "--user", f"{os.getuid()}:{os.getgid()}",
         config.AR5IVIST_DOCKER_IMAGE,
@@ -228,7 +236,7 @@ def _rescue_diagrams(source_dir: Path, main_name: str, output_dir: Path,
         print(f"          diagram rendering failed ({e}) — keeping placeholders",
               flush=True)
 
-    compiled, failed = rescue.verify(source_dir)
+    compiled, failed = rescue.verify(diagrams_dir)
     print(f"          diagrams: {compiled}/{report.count} rendered"
           + (f", {len(failed)} kept as placeholder" if failed else ""), flush=True)
 
@@ -249,8 +257,9 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
     # with the real TeX Live that ships in the same image, so the binding can
     # include them instead of dropping them. Purely additive: when nothing is
     # found, or the render fails, the diagram falls back to a placeholder.
+    diagrams_dir = Path(config.diagrams_dir(arxiv_id))
     if config.AR5IVIST_RENDER_DIAGRAMS and config.AR5IVIST_XYPIC_STUB:
-        _rescue_diagrams(source_dir, main_tex.name, output_dir, arxiv_id)
+        _rescue_diagrams(source_dir, diagrams_dir, main_tex.name, output_dir)
 
     # Step 2: Run Docker
     log_path = output_dir / "ar5ivist.log"
@@ -277,6 +286,9 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
                 "-v", f"{BINDINGS_DIR}:/reaper-bindings:ro",
                 "-e", f"REAPER_MAX_ERRORS={config.AR5IVIST_MAX_ERRORS}",
             ]
+        # 救援出来的图放在 process/ 下，但转换器只能按"相对文档目录"找文件
+        if diagrams_dir.exists():
+            cmd += ["-v", f"{diagrams_dir}:/source/{DIAGRAM_DIR_NAME}"]
         cmd += [
             config.AR5IVIST_DOCKER_IMAGE,
             "--source", main_tex.name,

@@ -61,7 +61,7 @@ curl 'http://localhost:16625/api/generate?arxiv_id=2111.05176&source=ar5ivist_do
 |---|---|---|
 | `reaper-qcircuit.sty` | 把 `\xymatrix` 换成"跳过选项、吞掉图表体"的宏：有救援图就插图，否则 `[diagram omitted]` 占位符 | `ar5ivist_xypic_stub`（默认开） |
 | `reaper-maxerrors.ltxml` | 抬高 LaTeXML 的 100 错误上限 | `ar5ivist_max_errors`（默认 100000，0 = 关） |
-| `diagram_rescue.py`（宿主）+ 容器里的 `latex`/`dvisvgm` | **图救援**：把画不了的图用真 LaTeX 渲染成 SVG，再插回 HTML | `ar5ivist_render_diagrams`（默认开） |
+| `diagram_rescue.py`（宿主）+ 容器里的 `latex`/`dvisvgm` | **图救援**：把画不了的图用真 LaTeX 渲染成 SVG（产物放 `process/reaper-diagrams/`，不进 `source/`），再插回 HTML | `ar5ivist_render_diagrams`（默认开） |
 
 注意：**光抬高上限不够**——它只让 LaTeXML 别中止，被 Xy-pic 破坏的解析照样静默
 丢内容；真正解决问题的是 qcircuit stub，而图救援把丢弃的图找回来。详见该目录的

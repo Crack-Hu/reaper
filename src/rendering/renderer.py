@@ -214,16 +214,26 @@ def _process_resources(html: str, fp: "FetchedPage",
                 # rescued diagrams are referenced: reaper-diagrams/d0.svg),
                 # then the historical "flattened filename" lookup.
                 names = [url] + ([url.split("/")[-1]] if "/" in url else [])
-                for name in names:
-                    local = (img_dir / name)
-                    try:
-                        local = local.resolve()
-                        local.relative_to(img_dir.resolve())     # stay inside
-                    except (OSError, ValueError):
-                        continue
-                    if local.is_file():
-                        raw = local.read_bytes()
+                # 救援图放在 process/ 下，但 HTML 里按"相对文档目录"引用
+                roots = [img_dir]
+                if getattr(fp, "arxiv_id", ""):
+                    roots.append(Path(config.diagrams_dir(fp.arxiv_id)))
+                found = None
+                for root in roots:
+                    for name in names:
+                        local = (root / name)
+                        try:
+                            local = local.resolve()
+                            local.relative_to(root.resolve())    # stay inside
+                        except (OSError, ValueError):
+                            continue
+                        if local.is_file():
+                            found = local
+                            break
+                    if found:
                         break
+                if found:
+                    raw = found.read_bytes()
             if raw is None and resource_dir:
                 full_url = cdn_url
                 raw = _fetch(full_url, referer=fp.page_url)

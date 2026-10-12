@@ -114,6 +114,11 @@ def reaper_html_dir(arxiv_id: str) -> str:
     return _p(arxiv_id, "process", "reaper_html")
 
 
+def diagrams_dir(arxiv_id: str) -> str:
+    """LaTeXML 画不了、由 Reaper 用真 LaTeX 渲染出来的图（SVG + 小文档）"""
+    return _p(arxiv_id, "process", "reaper-diagrams")
+
+
 def chat_dir(arxiv_id: str) -> str:
     """对话数据根目录"""
     return _p(arxiv_id, "chat")
