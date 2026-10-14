@@ -43,6 +43,11 @@ AR5IVIST_XYPIC_STUB = bool(cfg.get("ar5ivist_xypic_stub", True))
 # LaTeXML 画不了的图（Xy-pic/Qcircuit…），用容器里的真 LaTeX 渲染成 SVG 再插回
 # （见 src/ingestion/diagram_rescue.py）。关闭则只留 [diagram omitted] 占位符。
 AR5IVIST_RENDER_DIAGRAMS = bool(cfg.get("ar5ivist_render_diagrams", True))
+
+# 单次 LaTeXML 转换的上限（秒）。LaTeXML 可能卡在某个宏包上不返回（上游有过
+# infinite-loop issue），没有上限就会永久挂起；超时我们会杀掉容器并报错。
+# 0 = 不限制（不推荐）。
+AR5IVIST_TIMEOUT = int(cfg.get("ar5ivist_timeout", 3600))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
 LLM_API_KEY = api_cfg.get("key", "")

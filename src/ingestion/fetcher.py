@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 import os
 import threading
+import time
 from pathlib import Path
 from .. import config, logbook as _logbook
 
@@ -197,6 +198,19 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
     return main_tex
 
 
+def _docker_kill(name: str, timeout: float = 30.0) -> None:
+    """Best-effort stop+remove of a container.
+
+    Killing the *docker client* does not stop the container it started, so a
+    timeout has to go through the daemon (`docker rm -f`).
+    """
+    try:
+        subprocess.run(["docker", "rm", "-f", name],
+                       capture_output=True, timeout=timeout, check=False)
+    except Exception:
+        pass
+
+
 def _rescue_diagrams(source_dir: Path, diagrams_dir: Path, main_name: str,
                      output_dir: Path) -> None:
     """Render unsupported diagrams with the container's real LaTeX toolchain.
@@ -266,9 +280,13 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"          running ar5ivist (log: {log_path}) ...", flush=True)
 
+    timeout = config.AR5IVIST_TIMEOUT
+    container = f"reaper-{arxiv_id.replace('.', '-').replace('/', '-')}-{os.getpid()}"
+    timed_out = False
+
     with open(log_path, 'w') as log_f:
         cmd = [
-            "docker", "run",
+            "docker", "run", "--rm", "--name", container,
             "-v", f"{source_dir}:/source",
             "-v", f"{output_dir}:/output",
             "-w", "/source",
@@ -310,19 +328,30 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
         t = threading.Thread(target=_log_progress, daemon=True)
         t.start()
 
-        dots = 0
+        started = time.monotonic()
         while proc.poll() is None:
             t.join(timeout=15)
-            dots += 1
+            elapsed = time.monotonic() - started
             tail = last_line[0]
-            elapsed = dots * 15
-            if tail:
-                print(f"          [{elapsed}s] {tail}", flush=True)
-            else:
-                print(f"          [{elapsed}s] (no output)", flush=True)
+            print(f"          [{int(elapsed)}s] {tail if tail else '(no output)'}",
+                  flush=True)
+            # LaTeXML 会卡在个别宏包上（上游有过 infinite-loop 报告）；没有上限
+            # 就会永久挂起，所以到点就杀掉容器并让这个来源失败。
+            if timeout and elapsed > timeout:
+                timed_out = True
+                print(f"          ⏱ 超过 {timeout}s 仍在跑，停掉容器"
+                      f"（最后一行：{tail or '无输出'}）", flush=True)
+                _docker_kill(container)
+                break
 
         t.join(timeout=5)
         print(f"          docker exit: {proc.returncode}", flush=True)
+
+    if timed_out:
+        raise SourceError(
+            f"ar5ivist 转换超时（{timeout}s）：LaTeXML 没有跑完。"
+            f"最后一行：{last_line[0] or '（无输出）'}；完整日志见 {log_path}"
+        )
 
     # Step 3: Read output (images stay as local files, renderer handles embedding)
     output_html = output_dir / f"{arxiv_id}.html"

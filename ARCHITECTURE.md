@@ -177,6 +177,7 @@ MathML→LaTeX 语义转换。
   "ar5ivist_max_errors": 100000,
   "ar5ivist_xypic_stub": true,
   "ar5ivist_render_diagrams": true,
+  "ar5ivist_timeout": 3600,
   "chat":     {"idle_timeout": 900, "tools": "read,grep,find,ls",
                "pi_bin": "pi", "allow_remote": false,
                "model": null, "thinking": null}
@@ -186,6 +187,8 @@ MathML→LaTeX 语义转换。
 - `api.max_tokens` 必须覆盖推理 token（推理模型的 reasoning 也算在内）。
 - `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
 - `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
+- `ar5ivist_timeout` 单次 LaTeXML 转换的上限秒数（默认 3600，0 = 不限制）：LaTeXML
+  可能卡在某个宏包上不返回，超时会杀掉容器并让该来源失败（而不是永久挂起）。
 - `ar5ivist_max_errors` 抬高 LaTeXML 的错误上限（默认 100000，0 = 保持上游默认 100）；
   `ar5ivist_xypic_stub` 让 Xy-pic/Qcircuit 图表不再吞掉后续内容（默认开），
   `ar5ivist_render_diagrams` 再用真 LaTeX 把这些图渲染成 SVG 插回（默认开）。两者都通过

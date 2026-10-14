@@ -51,8 +51,9 @@ curl 'http://localhost:16625/api/generate?arxiv_id=2111.05176&source=ar5ivist_do
 （`_download_arxiv_source` 优先 `main.tex`）会被复用，不重复下载。
 
 前提：本机 Docker 在运行、镜像已拉取（`config.ar5ivist_docker_image`，如
-`latexml/ar5ivist:2512.17`）；编译**没有超时**，大论文可能跑很久，进度看
-`source/ar5ivist.log`。
+`latexml/ar5ivist:2512.17`）；大论文可能跑很久，进度看 `source/ar5ivist.log`。
+转换有上限 `ar5ivist_timeout`（默认 3600s）：LaTeXML 会卡在个别宏包上不返回
+（上游有过 infinite-loop issue），超时会杀掉容器并让该来源失败，而不是永久挂起。
 
 **编译侧的处理**（`src/ingestion/ar5ivist_bindings/`，随程序分发、只读挂载、
 `--preload` 注入，**不修改论文源码**）：

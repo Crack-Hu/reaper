@@ -24,6 +24,7 @@
   "ar5ivist_max_errors": 100000,
   "ar5ivist_xypic_stub": true,
   "ar5ivist_render_diagrams": true,
+  "ar5ivist_timeout": 3600,
   "chat": {
     "idle_timeout": 900,
     "tools": "read,grep,find,ls",
