@@ -198,6 +198,61 @@ def _download_arxiv_source(arxiv_id: str, target_dir: Path) -> Path:
     return main_tex
 
 
+def _ensure_image(image: str) -> None:
+    """Make sure the container image exists locally, pulling it if needed.
+
+    `docker run` pulls implicitly when the image is missing, which silently
+    mixes a multi-GB download into what we report as conversion progress (and,
+    worse, into the conversion timeout). Pulling explicitly makes the first run
+    look like a download instead of a hang — the user still has to wait, but
+    they know why.
+    """
+    try:
+        probe = subprocess.run(["docker", "image", "inspect", image],
+                               capture_output=True, timeout=60, check=False)
+    except FileNotFoundError as e:
+        raise SourceError(
+            "找不到 docker 命令：ar5ivist_docker 来源需要本机 Docker 在运行"
+        ) from e
+    except subprocess.TimeoutExpired:
+        probe = None
+    if probe is not None and probe.returncode == 0:
+        return
+
+    print(f"          image {image} 不在本地 —— 开始拉取"
+          f"（首次需要下载数 GB，可能要几分钟到几十分钟）...", flush=True)
+    timeout = config.AR5IVIST_PULL_TIMEOUT
+    proc = subprocess.Popen(["docker", "pull", image],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    last = [""]
+
+    def _drain():
+        for line in proc.stdout:
+            last[0] = line.rstrip()
+
+    t = threading.Thread(target=_drain, daemon=True)
+    t.start()
+    started = time.monotonic()
+    while proc.poll() is None:
+        t.join(timeout=15)
+        elapsed = int(time.monotonic() - started)
+        print(f"          [pull {elapsed}s] {last[0][-90:] if last[0] else '(no output)'}",
+              flush=True)
+        if timeout and elapsed > timeout:
+            proc.kill()
+            raise SourceError(
+                f"拉取镜像 {image} 超过 {timeout}s 未完成 —— 网络太慢或磁盘空间不足"
+                f"（可手动 `docker pull {image}` 后再试）"
+            )
+    t.join(timeout=5)
+    if proc.returncode != 0:
+        raise SourceError(
+            f"拉取镜像 {image} 失败（docker exit {proc.returncode}）："
+            f"{last[0] or '（无输出）'}"
+        )
+    print(f"          image ready: {image}", flush=True)
+
+
 def _docker_kill(name: str, timeout: float = 30.0) -> None:
     """Best-effort stop+remove of a container.
 
@@ -266,6 +321,9 @@ def _try_ar5ivist_docker(arxiv_id: str) -> str:
     # Step 1: Download source
     print(f"          downloading source for {arxiv_id} ...", flush=True)
     main_tex = _download_arxiv_source(arxiv_id, source_dir)
+
+    # Step 1a: the image may have to be downloaded first (see _ensure_image)
+    _ensure_image(config.AR5IVIST_DOCKER_IMAGE)
 
     # Step 1b: render the diagrams LaTeXML cannot handle (Xy-pic/Qcircuit …)
     # with the real TeX Live that ships in the same image, so the binding can

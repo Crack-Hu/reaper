@@ -52,6 +52,10 @@ curl 'http://localhost:16625/api/generate?arxiv_id=2111.05176&source=ar5ivist_do
 
 前提：本机 Docker 在运行、镜像已拉取（`config.ar5ivist_docker_image`，如
 `latexml/ar5ivist:2512.17`）；大论文可能跑很久，进度看 `source/ar5ivist.log`。
+首次运行会先拉取镜像（数 GB，含完整 TeX Live；进度会实时打印，上限
+`ar5ivist_pull_timeout`，默认 7200s）——镜像不在本地时日志里会出现
+`Unable to find image … locally` 与 `<layer-id>: Already exists` 之类的
+docker 拉取信息，那不是错误、也不是卡住。
 转换有上限 `ar5ivist_timeout`（默认 3600s）：LaTeXML 会卡在个别宏包上不返回
 （上游有过 infinite-loop issue），超时会杀掉容器并让该来源失败，而不是永久挂起。
 

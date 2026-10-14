@@ -48,6 +48,10 @@ AR5IVIST_RENDER_DIAGRAMS = bool(cfg.get("ar5ivist_render_diagrams", True))
 # infinite-loop issue），没有上限就会永久挂起；超时我们会杀掉容器并报错。
 # 0 = 不限制（不推荐）。
 AR5IVIST_TIMEOUT = int(cfg.get("ar5ivist_timeout", 3600))
+
+# 首次使用时 docker 要先把镜像拉下来（ar5ivist 基础镜像含完整 TeX Live，数 GB）。
+# 拉取单独计时/单独上限，不占用转换的额度。
+AR5IVIST_PULL_TIMEOUT = int(cfg.get("ar5ivist_pull_timeout", 7200))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
 LLM_API_KEY = api_cfg.get("key", "")

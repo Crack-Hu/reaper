@@ -25,6 +25,7 @@
   "ar5ivist_xypic_stub": true,
   "ar5ivist_render_diagrams": true,
   "ar5ivist_timeout": 3600,
+  "ar5ivist_pull_timeout": 7200,
   "chat": {
     "idle_timeout": 900,
     "tools": "read,grep,find,ls",
