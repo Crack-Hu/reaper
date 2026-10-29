@@ -14,8 +14,11 @@
 
 ## 主流程（`render_bilingual_html`）
 
-1. **来源清洗**：arxiv.org/html 去掉 arXiv 品牌脚本、删 `<base>`、把站内 TOC 链接
-   改成文档锚点；正文包进 `<div class="reaper-content">`。
+1. **来源清洗**（`_strip_arxiv_brand`）：arxiv.org/html 来源会剥掉 arXiv 的页面
+   chrome —— 整个 `<header class="arxiv-html-header">`（logo、"Why HTML?"、Report/PDF
+   按钮；**只删里面的 logo/nav 会留下空 header，被 arXiv CSS 渲染成一条空栏**）、
+   公告条 `ds-announcement`、隐藏的 "Report GitHub Issue" `<dialog>`，以及品牌脚本；
+   删 `<base>`，把站内 TOC 链接改成文档锚点；正文包进 `<div class="reaper-content">`。
 2. **CSS**：`_inline_css` 把 ar5iv CSS 内嵌为 `<style>`（本地缓存优先）。
 3. **资源**：`_process_resources` 扫描 `src/data/poster`，下载图片/字体/SVG。
    - `resource_dir` 给定 → 保存到 `{resource_dir}/assets/`，相对路径 + CDN 兜底（Full）。

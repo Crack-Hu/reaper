@@ -134,7 +134,13 @@ def _inline_css(html: str) -> tuple[str, str]:
 
 
 def _strip_arxiv_brand(html: str) -> str:
-    """Remove arXiv-specific JS/CSS, keep TOC sidebar structure."""
+    """Remove arXiv's page chrome (header bar, announcement, JS/CSS).
+
+    Only the *children* of the header used to be removed (logo, nav), which left
+    an empty ``<header class="arxiv-html-header">`` behind — the arXiv CSS still
+    gives it a background and height, so a blank bar showed up above the paper
+    (and looked broken inside Zotero). Remove the whole element.
+    """
     # Remove ALL external scripts from arxiv CDN (they are branding, not content)
     html = re.sub(r'<script[^>]*src="https?://[^"]*arxiv[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*src="[^"]*\/static\/[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
@@ -145,10 +151,18 @@ def _strip_arxiv_brand(html: str) -> str:
     html = re.sub(r'<link[^>]*latexml_styles[^>]*>', '', html)
     # Remove arXiv announcement banner
     html = re.sub(r'<div\b[^>]*class="[^"]*ds-announcement[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
-    # Remove arXiv logo header
+    # Remove the whole arXiv page header: logo + "Why HTML?" / "Report Issue" /
+    # "Download PDF" buttons. Leaving the empty <header> shell behind renders as
+    # a blank bar (arXiv's CSS still styles it).
+    html = re.sub(r'<header\b[^>]*class="[^"]*arxiv-html-header[^"]*"[^>]*>.*?</header>', '', html, flags=re.DOTALL)
+    # Fallbacks for other arXiv page layouts: inner logo / nav, then a bare
+    # header whose children we already removed.
     html = re.sub(r'<div\b[^>]*class="[^"]*html-header-logo[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
-    # Remove arXiv header navigation (Back to Abstract, Report Issue, Download PDF)
     html = re.sub(r'<nav\b[^>]*class="[^"]*html-header-nav[^"]*"[^>]*>.*?</nav>', '', html, flags=re.DOTALL)
+    html = re.sub(r'<header\b[^>]*class="[^"]*html-header[^"]*"[^>]*>.*?</header>', '', html, flags=re.DOTALL)
+    # arXiv's hidden "Report GitHub Issue" modal: invisible, but it is page
+    # chrome (and a large form) that has no business in a reading copy.
+    html = re.sub(r'<dialog\b[^>]*id="modal-form"[^>]*>.*?</dialog>', '', html, flags=re.DOTALL)
     # Remove license footer and watermark
     html = re.sub(r'<a\b[^>]*id="license-tr"[^>]*>.*?</a>', '', html, flags=re.DOTALL)
     html = re.sub(r'<div\b[^>]*id="watermark-tr"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
