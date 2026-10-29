@@ -11,7 +11,7 @@
 | 部分 | 状态 |
 |---|---|
 | 论文生成线（获取 → 解析 → 翻译 → 渲染 → Zotero 附件） | ✅ 可用 |
-| 对话后端（pi 桥 / 会话 / SSE API / 论文工作区） | ✅ 可用（分支 `feat/chat-panel`） |
+| 对话后端（pi 桥 / 会话 / SSE API / 论文工作区） | ✅ 可用 |
 | **Zotero 对话面板** | 🚧 **下一步** → `zotero-plugin/README.md` |
 | 选中段落提问 / 引用解析 | 🔲 计划 → `CHAT_PLAN.md` |
 

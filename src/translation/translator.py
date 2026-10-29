@@ -127,7 +127,9 @@ def call_llm_api(system_prompt, user_prompt, api_key="", base_url="", model="", 
     url = base_url or config.LLM_BASE_URL
     model_name = model or config.LLM_MODEL
     if not key:
-        raise RuntimeError("No API key configured. Set key in config.json.")
+        raise RuntimeError(
+            "No API key configured: set api.key in config.json, "
+            "or \"$DEEPSEEK_API_KEY\" and export that variable.")
 
     endpoint = f"{url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}

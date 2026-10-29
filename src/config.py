@@ -15,6 +15,20 @@ def _load_config():
     return {}
 
 
+def _env_value(value):
+    """把配置里的 "$VAR" / "${VAR}" 解析成环境变量值。
+
+    这样 config.json 里可以只写变量名，真实 key 留在环境里
+    （`export DEEPSEEK_API_KEY=sk-...`），配置文件就不会带密。
+    变量未设置时返回空串，让调用方报「未配置 API key」，
+    而不是把字面量 "$VAR" 当成 key 发给端点。
+    """
+    if not isinstance(value, str) or not value.startswith("$"):
+        return value
+    name = value[2:-1] if value.startswith("${") and value.endswith("}") else value[1:]
+    return os.environ.get(name, "")
+
+
 cfg = _load_config()
 api_cfg = cfg.get("api", {})
 srv_cfg = cfg.get("server", {})
@@ -54,9 +68,9 @@ AR5IVIST_TIMEOUT = int(cfg.get("ar5ivist_timeout", 3600))
 AR5IVIST_PULL_TIMEOUT = int(cfg.get("ar5ivist_pull_timeout", 7200))
 AR5IVIST_IDLE_TIMEOUT = int(cfg.get("ar5ivist_idle_timeout", 120))
 
-LLM_API_KEY = api_cfg.get("key", "")
+LLM_API_KEY = _env_value(api_cfg.get("key", ""))
 LLM_BASE_URL = api_cfg.get("base_url", "https://api.deepseek.com/v1")
-LLM_MODEL = api_cfg.get("model", "deepseek-chat")
+LLM_MODEL = api_cfg.get("model", "deepseek-flash")
 
 # 单次请求的输出上限。**推理模型的推理 token 也算在这里面**，所以不能给得太小：
 # 翻译一个长小节时，推理能轻易吃掉几千 token，正文就没预算了（表现为

@@ -168,7 +168,8 @@ MathML→LaTeX 语义转换。
 
 ```json
 {
-  "api":      {"key": "...", "base_url": "...", "model": "...",
+  "api":      {"key": "$DEEPSEEK_API_KEY", "base_url": "https://api.deepseek.com/v1",
+               "model": "deepseek-flash",
                "max_tokens": 16384, "params": {"reasoning_effort": "none"}},
   "server":   {"host": "0.0.0.0", "port": 16625},
   "translator": {"concurrency": 3},
@@ -185,6 +186,8 @@ MathML→LaTeX 语义转换。
 }
 ```
 
+- `api.key` 可以写 `$VAR` / `${VAR}`（如 `$DEEPSEEK_API_KEY`），运行时从环境变量解析；
+  变量未设置时报「未配置 API key」，不会把字面量当 key 发出去。
 - `api.max_tokens` 必须覆盖推理 token（推理模型的 reasoning 也算在内）。
 - `api.params` 原样合并进请求体；端点返回 400 时自动去掉 params 重试一次。
 - `chat.model` / `chat.thinking` 为空即不传，用 pi 自己的配置（不做配置统一）。
