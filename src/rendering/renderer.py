@@ -133,6 +133,39 @@ def _inline_css(html: str) -> tuple[str, str]:
     return html, css_block
 
 
+def _drop_element(html: str, open_pattern: str, tag: str) -> str:
+    """Remove every element whose opening tag matches `open_pattern`, balanced.
+
+    arXiv changes its page chrome from time to time (`.arxiv-html-header` in one
+    layout, `.arxiv-html-site-chrome` / `.ds-site-header` in the next). Removing
+    only the inner logo/nav leaves an empty shell that the arXiv CSS still draws
+    as a bar, so the *whole* element has to go — with its nested children.
+    """
+    while True:
+        m = re.search(open_pattern, html)
+        if not m:
+            return html
+        close = _find_close_tag(html, m.start(), tag)
+        if close < 0:                       # malformed markup: leave it alone
+            return html
+        end = html.find(">", close) + 1
+        html = html[:m.start()] + html[end:]
+
+
+def _drop_blocks_matching(html: str, tag: str, markers: tuple[str, ...]) -> str:
+    """Drop inline <style>/<script> blocks that mention any of `markers`.
+
+    arXiv's new layout ships a chrome stylesheet (body grid rules, a reading-mode
+    switch, a rule that hides `.ltx_page_navbar` on narrow screens) and an inline
+    script that applies reading preferences from localStorage. Neither belongs in
+    our reading copy — our own ar5iv CSS is injected afterwards.
+    """
+    def _repl(m: re.Match) -> str:
+        return "" if any(mark in m.group(2) for mark in markers) else m.group(0)
+    return re.sub(rf"(<{tag}\b[^>]*>)(.*?)(</{tag}>)", _repl, html,
+                  flags=re.DOTALL | re.IGNORECASE)
+
+
 def _strip_arxiv_brand(html: str) -> str:
     """Remove arXiv's page chrome (header bar, announcement, JS/CSS).
 
@@ -149,20 +182,32 @@ def _strip_arxiv_brand(html: str) -> str:
     html = re.sub(r'<script[^>]*feedbackOverlay[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*html2canvas[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<link[^>]*latexml_styles[^>]*>', '', html)
-    # Remove arXiv announcement banner
-    html = re.sub(r'<div\b[^>]*class="[^"]*ds-announcement[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
-    # Remove the whole arXiv page header: logo + "Why HTML?" / "Report Issue" /
-    # "Download PDF" buttons. Leaving the empty <header> shell behind renders as
-    # a blank bar (arXiv's CSS still styles it).
-    html = re.sub(r'<header\b[^>]*class="[^"]*arxiv-html-header[^"]*"[^>]*>.*?</header>', '', html, flags=re.DOTALL)
-    # Fallbacks for other arXiv page layouts: inner logo / nav, then a bare
-    # header whose children we already removed.
-    html = re.sub(r'<div\b[^>]*class="[^"]*html-header-logo[^"]*"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
-    html = re.sub(r'<nav\b[^>]*class="[^"]*html-header-nav[^"]*"[^>]*>.*?</nav>', '', html, flags=re.DOTALL)
-    html = re.sub(r'<header\b[^>]*class="[^"]*html-header[^"]*"[^>]*>.*?</header>', '', html, flags=re.DOTALL)
-    # arXiv's hidden "Report GitHub Issue" modal: invisible, but it is page
-    # chrome (and a large form) that has no business in a reading copy.
-    html = re.sub(r'<dialog\b[^>]*id="modal-form"[^>]*>.*?</dialog>', '', html, flags=re.DOTALL)
+    # arXiv's page chrome comes in (at least) two layouts; remove the whole
+    # elements, not just their logo/nav children — an empty shell is still drawn
+    # as a bar by arXiv's CSS.
+    #   new: <div class="arxiv-html-site-chrome"><header class="ds-site-header">…
+    #        <footer class="ds-site-footer">…      (logo, "Why HTML?", menu)
+    #   old: <header class="arxiv-html-header">…    (rendered as a bar)
+    html = _drop_element(html, r'<div\b[^>]*class="[^"]*arxiv-html-site-chrome', 'div')
+    html = _drop_element(html, r'<header\b[^>]*class="[^"]*arxiv-html-header', 'header')
+    html = _drop_element(html, r'<header\b[^>]*class="[^"]*ds-site-header', 'header')
+    html = _drop_element(html, r'<footer\b[^>]*class="[^"]*ds-site-footer', 'footer')
+    html = _drop_element(html, r'<footer\b[^>]*class="[^"]*arxiv-html-footer', 'footer')
+    # "Skip to main content" link: without arXiv's stylesheet it would show up as
+    # stray text at the very top of the page.
+    html = _drop_element(html, r'<a\b[^>]*class="[^"]*ds-skip-link', 'a')
+    # Hidden "Report GitHub Issue" modal: invisible, but page chrome + a big form.
+    html = _drop_element(html, r'<dialog\b[^>]*id="modal-form"', 'dialog')
+    # Older layout leftovers (announcement bar, logo/nav that were siblings).
+    html = _drop_element(html, r'<div\b[^>]*class="[^"]*ds-announcement', 'div')
+    html = _drop_element(html, r'<div\b[^>]*class="[^"]*html-header-logo', 'div')
+    html = _drop_element(html, r'<nav\b[^>]*class="[^"]*html-header-nav', 'nav')
+    # arXiv's chrome stylesheet + reading-mode script (body grid, hides our TOC
+    # on narrow screens, localStorage-driven attributes). Our own ar5iv CSS is
+    # injected afterwards, so nothing of value is lost here.
+    chrome_markers = ("arxiv-html-site-chrome", "data-reading-mode")
+    html = _drop_blocks_matching(html, "style", chrome_markers)
+    html = _drop_blocks_matching(html, "script", chrome_markers)
     # Remove license footer and watermark
     html = re.sub(r'<a\b[^>]*id="license-tr"[^>]*>.*?</a>', '', html, flags=re.DOTALL)
     html = re.sub(r'<div\b[^>]*id="watermark-tr"[^>]*>.*?</div>', '', html, flags=re.DOTALL)
