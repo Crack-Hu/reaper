@@ -18,9 +18,13 @@
 ## 快速开始
 
 ```bash
-pip3 install -r requirements.txt      # 依赖只有 httpx
-python3 src/server.py                 # 后端 → http://localhost:16625
-python3 main.py 2401.04268            # CLI：单篇论文全流程
+# 依赖只有 httpx。macOS + Homebrew 的 Python 启用了 PEP 668，pip3 会被拒绝，
+# 所以用项目内的 venv（.venv/ 已 gitignore）：
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python src/server.py        # 后端 → http://localhost:16625
+python3.14 src/server.py              # 备选：本机 3.14 已装有 httpx（无需安装）
+.venv/bin/python main.py 2401.04268   # CLI：单篇论文全流程
 bash zotero-plugin/setup.sh           # 打包并安装 Zotero 插件（重启 Zotero 生效）
 ```
 

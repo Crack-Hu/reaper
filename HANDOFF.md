@@ -251,7 +251,13 @@ bash zotero-plugin/setup.sh
 ## 10. 环境
 
 - 开发机：macOS；Python 3.14（`__pycache__` 可见 cpython-314）
-- 依赖：`pip3 install -r requirements.txt`（只有 httpx）；插件端 Zotero 9/10。
+- 依赖：只有 `httpx`。**macOS + Homebrew Python 有 PEP 668 限制**（`pip3 install`
+  会报 `externally-managed-environment`），所以用项目内 venv：
+  `python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`，
+  之后统一用 `.venv/bin/python src/server.py`。
+  （本机另有 `python3.14` 已装好 httpx，可临时用 `python3.14 src/server.py`；
+  Homebrew 升级 python 时旧解释器的包不会跟过去——本机就从 3.14 升到了 3.15。）
+- 插件端 Zotero 9/10。
   本机 `pi` 需在 PATH（`which pi`；开发机为 `/opt/homebrew/bin/pi` 1.1.0）
 - LLM：兼容 OpenAI `/chat/completions` 的端点；`config.json → api.params` 原样透传
   （如 `reasoning_effort: none`），端点拒绝时会自动去掉参数重试一次

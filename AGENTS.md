@@ -47,5 +47,7 @@
 
 ## 环境
 
-- macOS + Python 3.14；依赖 `httpx`（`pip3 install -r requirements.txt`）。
+- macOS；依赖只有 `httpx`。Homebrew Python 有 PEP 668（`pip3 install` 被拒）→ 用
+  `.venv/`：`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`，
+  启动用 `.venv/bin/python src/server.py`。
 - 后端：`python3 src/server.py`；测试页：`/api/chat/prototype`。
